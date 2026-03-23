@@ -25,15 +25,26 @@ static const char *TAG = "rc_remote";
 #define BUTTON_BACKWARD     GPIO_NUM_2
 #define BUTTON_LEFT         GPIO_NUM_3
 #define BUTTON_RIGHT        GPIO_NUM_4
-#define BUTTON_SPEED_UP     GPIO_NUM_13
-#define BUTTON_SPEED_DOWN   GPIO_NUM_14
+#define BUTTON_SPEED_UP     GPIO_NUM_10
+#define BUTTON_SPEED_DOWN   GPIO_NUM_11
 
 #define SPEED_DEFAULT   30
-#define SPEED_MIN       10
+#define SPEED_MIN       30
 #define SPEED_MAX       100
-#define SPEED_STEP      10
+#define SPEED_STEP      30
 
 static uint8_t current_speed = SPEED_DEFAULT;
+
+/* ── LED GPIOs ───────────────────────────────────────────────────── */
+#define LED_NOT_CONNECTED   GPIO_NUM_5
+#define LED_SPEED_1         GPIO_NUM_6   /* 30 %  */
+#define LED_SPEED_2         GPIO_NUM_7   /* 60 %  */
+#define LED_SPEED_3         GPIO_NUM_8   /* 100 % */
+
+static const gpio_num_t speed_leds[] = {
+    LED_SPEED_1, LED_SPEED_2, LED_SPEED_3,
+};
+#define SPEED_LED_COUNT (sizeof(speed_leds) / sizeof(speed_leds[0]))
 
 /* ── BLE state ───────────────────────────────────────────────────── */
 static uint16_t conn_handle    = BLE_HS_CONN_HANDLE_NONE;
@@ -63,6 +74,38 @@ static void gpio_init_buttons(void)
         };
         gpio_config(&cfg);
     }
+}
+
+static void gpio_init_leds(void)
+{
+    const gpio_num_t pins[] = {
+        LED_NOT_CONNECTED,
+        LED_SPEED_1, LED_SPEED_2, LED_SPEED_3,
+    };
+    for (int i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        gpio_config_t cfg = {
+            .pin_bit_mask  = 1ULL << pins[i],
+            .mode          = GPIO_MODE_OUTPUT,
+            .pull_up_en    = GPIO_PULLUP_DISABLE,
+            .pull_down_en  = GPIO_PULLDOWN_DISABLE,
+            .intr_type     = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&cfg);
+        gpio_set_level(pins[i], 0);
+    }
+}
+
+static void update_speed_leds(void)
+{
+    /* Each LED represents one 30 % step: 30%→1, 60%→2, 100%→3 */
+    int lit = current_speed / SPEED_STEP;
+    for (int i = 0; i < SPEED_LED_COUNT; i++)
+        gpio_set_level(speed_leds[i], i < lit ? 1 : 0);
+}
+
+static void update_connection_led(void)
+{
+    gpio_set_level(LED_NOT_CONNECTED, connected ? 0 : 1);
 }
 
 static inline bool btn(gpio_num_t pin) { return gpio_get_level(pin) == 0; }
@@ -171,6 +214,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             conn_handle = event->connect.conn_handle;
             connected   = true;
             chr_discovered = false;
+            update_connection_led();
             ESP_LOGI(TAG, "Connected — discovering services");
 
             ble_gap_set_prefered_le_phy(conn_handle,
@@ -184,6 +228,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         } else {
             ESP_LOGW(TAG, "Connect failed: %d", event->connect.status);
             connected = false;
+            update_connection_led();
             start_scan();
         }
         break;
@@ -193,6 +238,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         connected      = false;
         chr_discovered = false;
         conn_handle    = BLE_HS_CONN_HANDLE_NONE;
+        update_connection_led();
         start_scan();
         break;
 
@@ -230,10 +276,14 @@ static void control_task(void *param)
         bool su = btn(BUTTON_SPEED_UP);
         bool sd = btn(BUTTON_SPEED_DOWN);
 
-        if (su && !su_prev && current_speed < SPEED_MAX)
+        if (su && !su_prev && current_speed < SPEED_MAX) {
             current_speed += SPEED_STEP;
-        if (sd && !sd_prev && current_speed > SPEED_MIN)
+            update_speed_leds();
+        }
+        if (sd && !sd_prev && current_speed > SPEED_MIN) {
             current_speed -= SPEED_STEP;
+            update_speed_leds();
+        }
 
         su_prev = su;
         sd_prev = sd;
@@ -277,8 +327,11 @@ void remote_main(void)
         nvs_flash_init();
     }
 
-    /* Buttons */
+    /* GPIO */
     gpio_init_buttons();
+    gpio_init_leds();
+    update_speed_leds();
+    update_connection_led();
 
     /* NimBLE */
     ret = nimble_port_init();
