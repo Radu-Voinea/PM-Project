@@ -28,7 +28,11 @@ static const char *TAG = "rc_remote";
 #define JOY_SW_PIN          GPIO_NUM_3
 
 #define ADC_MAX             4095            /* 12-bit ADC */
-#define JOY_DEADZONE        300             /* centre dead-zone (raw counts) */
+#define JOY_DEADZONE        200             /* centre dead-zone (raw counts) */
+#define JOY_CAL_SAMPLES     64              /* samples averaged for centre cal */
+
+static int joy_center_x = ADC_MAX / 2;
+static int joy_center_y = ADC_MAX / 2;
 
 /* Speed modes cycled by SW button press */
 static const uint8_t speed_modes[] = { 30, 60, 100 };
@@ -87,14 +91,39 @@ static void joystick_init(void)
     gpio_config(&sw_cfg);
 }
 
-/* Map raw ADC (0–4095) to -100…+100 with a centre dead-zone */
+/* Calibrate joystick centre from live readings (call at startup, stick untouched) */
+static void joystick_calibrate(void)
+{
+    int32_t sum_x = 0, sum_y = 0;
+    for (int i = 0; i < JOY_CAL_SAMPLES; i++) {
+        int rx = 0, ry = 0;
+        adc_oneshot_read(adc_handle, JOY_VRX_CHAN, &rx);
+        adc_oneshot_read(adc_handle, JOY_VRY_CHAN, &ry);
+        sum_x += rx;
+        sum_y += ry;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    joy_center_x = (int)(sum_x / JOY_CAL_SAMPLES);
+    joy_center_y = (int)(sum_y / JOY_CAL_SAMPLES);
+    ESP_LOGI(TAG, "Joystick calibrated: center_x=%d  center_y=%d",
+             joy_center_x, joy_center_y);
+}
+
+/* Map raw ADC to -100…+100 relative to calibrated centre */
 static int joy_axis(adc_channel_t ch)
 {
     int raw = 0;
     adc_oneshot_read(adc_handle, ch, &raw);
-    int centered = raw - (ADC_MAX / 2);       /* -2048 … +2047 */
+
+    int center = (ch == JOY_VRX_CHAN) ? joy_center_x : joy_center_y;
+    int centered = raw - center;
+
     if (abs(centered) < JOY_DEADZONE) return 0;
-    return (int)((int32_t)centered * 100 / (ADC_MAX / 2));
+
+    /* Scale using the actual range on each side of centre */
+    int range = (centered > 0) ? (ADC_MAX - center) : center;
+    if (range == 0) range = 1;
+    return (int)((int32_t)centered * 100 / range);
 }
 
 static void gpio_init_leds(void)
@@ -301,6 +330,13 @@ static void control_task(void *param)
         }
         sw_prev = sw;
 
+        /* Read raw ADC values for debugging */
+        int raw_x = 0, raw_y = 0;
+        adc_oneshot_read(adc_handle, JOY_VRX_CHAN, &raw_x);
+        adc_oneshot_read(adc_handle, JOY_VRY_CHAN, &raw_y);
+        ESP_LOGI(TAG, "[HW-504 RAW] VRx=%4d  VRy=%4d  SW=%d",
+                 raw_x, raw_y, gpio_get_level(JOY_SW_PIN));
+
         /* Read joystick axes */
         int x = joy_axis(JOY_VRX_CHAN);   /* left/right */
         int y = joy_axis(JOY_VRY_CHAN);   /* forward/backward */
@@ -321,6 +357,7 @@ static void control_task(void *param)
 
         /* Send command over BLE */
         if (connected && chr_discovered) {
+            ESP_LOGI(TAG, "x=%+4d y=%+4d spd=%3u", cmd.x, cmd.y, cmd.speed);
             ble_gattc_write_no_rsp_flat(conn_handle, cmd_chr_handle,
                                         &cmd, sizeof(cmd));
         }
@@ -344,6 +381,7 @@ void remote_main(void)
 
     /* GPIO / ADC */
     joystick_init();
+    joystick_calibrate();
     gpio_init_leds();
     update_speed_leds();
     update_connection_led();
