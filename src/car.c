@@ -22,14 +22,14 @@
 static const char *TAG = "rc_car";
 
 /* ── Motor GPIO pins (directly from the original layout) ─────────── */
-#define FRONT_FORWARD_LEFT    GPIO_NUM_1
-#define FRONT_BACKWARDS_LEFT  GPIO_NUM_2
-#define FRONT_FORWARD_RIGHT   GPIO_NUM_3
-#define FRONT_BACKWARDS_RIGHT GPIO_NUM_4
-#define BACK_BACKWARDS_RIGHT  GPIO_NUM_5
-#define BACK_FRONTWARDS_RIGHT GPIO_NUM_6
-#define BACK_FRONTWARDS_LEFT  GPIO_NUM_7
-#define BACK_BACKWARDS_LEFT   GPIO_NUM_8
+#define FRONT_LEFT_FORWARDS   GPIO_NUM_46 // left-h2-in2  // blue
+#define FRONT_LEFT_BACKWARDS  GPIO_NUM_47 // left-h2-in1  // red
+#define FRONT_RIGHT_FORWARDS  GPIO_NUM_35 // right-h2-in3 // brown
+#define FRONT_RIGHT_BACKWARDS GPIO_NUM_21 // right-h2-in4 // green
+#define REAR_RIGHT_BACKWARDS  GPIO_NUM_37 // right-h2-in1 // gray
+#define REAR_RIGHT_FORWARDS   GPIO_NUM_36 // right-h2-in2 // blue
+#define REAR_LEFT_FORWARDS    GPIO_NUM_38 // left-h2-in4  // brown
+#define REAR_LEFT_BACKWARDS   GPIO_NUM_45 // left-h2-in3  // purple
 
 /* ── LEDC / PWM ──────────────────────────────────────────────────── */
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
@@ -49,14 +49,14 @@ enum {
 };
 
 static const motor_ch_t motors[MOTOR_COUNT] = {
-    [M_FL_FWD] = { FRONT_FORWARD_LEFT,    LEDC_CHANNEL_0 },
-    [M_FL_BWD] = { FRONT_BACKWARDS_LEFT,  LEDC_CHANNEL_1 },
-    [M_FR_FWD] = { FRONT_FORWARD_RIGHT,   LEDC_CHANNEL_2 },
-    [M_FR_BWD] = { FRONT_BACKWARDS_RIGHT, LEDC_CHANNEL_3 },
-    [M_BL_FWD] = { BACK_FRONTWARDS_LEFT,  LEDC_CHANNEL_4 },
-    [M_BL_BWD] = { BACK_BACKWARDS_LEFT,   LEDC_CHANNEL_5 },
-    [M_BR_FWD] = { BACK_FRONTWARDS_RIGHT, LEDC_CHANNEL_6 },
-    [M_BR_BWD] = { BACK_BACKWARDS_RIGHT,  LEDC_CHANNEL_7 },
+    [M_FL_FWD] = { FRONT_LEFT_FORWARDS,    LEDC_CHANNEL_0 },
+    [M_FL_BWD] = { FRONT_LEFT_BACKWARDS,  LEDC_CHANNEL_1 },
+    [M_FR_FWD] = { FRONT_RIGHT_FORWARDS,   LEDC_CHANNEL_2 },
+    [M_FR_BWD] = { FRONT_RIGHT_BACKWARDS, LEDC_CHANNEL_3 },
+    [M_BL_FWD] = { REAR_LEFT_FORWARDS,  LEDC_CHANNEL_4 },
+    [M_BL_BWD] = { REAR_LEFT_BACKWARDS,   LEDC_CHANNEL_5 },
+    [M_BR_FWD] = { REAR_RIGHT_FORWARDS, LEDC_CHANNEL_6 },
+    [M_BR_BWD] = { REAR_RIGHT_BACKWARDS,  LEDC_CHANNEL_7 },
 };
 
 /* ── Motor helpers ───────────────────────────────────────────────── */
