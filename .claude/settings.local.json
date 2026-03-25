@@ -2,7 +2,24 @@
   "permissions": {
     "allow": [
       "Bash(pio run:*)",
-      "Bash(grep -v \"^d.*\\\\.$\")"
+      "Bash(grep -v \"^d.*\\\\.$\")",
+      "Bash(ls:*)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio -type f -name *.c -o -name *.h)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/bt/host/nimble -type f \\\\\\(-name *.c -o -name *.h \\\\\\))",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf/bt -type f -name *.c)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build -type f -name *.c)",
+      "Bash(xargs grep:*)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build -name Kconfig* -type f)",
+      "Bash(grep -r \"gattc\\\\|GATTC\" /c/Data/University/PM/project-v23e/.pio/build/car --include=*.h)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf/bt/CMakeFiles/__idf_bt.dir/host/nimble -type f -name *.c)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf/bt -name *.c.o.d)",
+      "Bash(objdump -s /c/Data/University/PM/project-v23e/.pio/build/car/bt/host/nimble/nimble/nimble/host/src/ble_gattc.c.o)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car -name *.cmake -o -name CMakeCache.txt)",
+      "Bash(grep -r \"GATTC\\\\|gattc\" /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf/bt --include=*.h)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/bt/host/nimble -name *.h)",
+      "Bash(grep -r \"BLE_LOG\\\\|NIMBLE_LOGD\\\\|NIMBLE_LOGI\" /c/Data/University/PM/project-v23e/.pio/build/car --include=*.h)",
+      "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf -name *.h -type f)",
+      "Bash(find /c/Data/University/PM/project-v23e -name *.md -o -name *.txt -o -name *.rst)"
     ]
   }
 }
