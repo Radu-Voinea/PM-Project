@@ -4,11 +4,13 @@
 #include "ble_common.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
 
 /* NimBLE */
 #include "nimble/nimble_port.h"
@@ -20,26 +22,27 @@
 
 static const char *TAG = "rc_remote";
 
-/* ── Button GPIOs ────────────────────────────────────────────────── */
-#define BUTTON_FORWARD      GPIO_NUM_1
-#define BUTTON_BACKWARD     GPIO_NUM_2
-#define BUTTON_LEFT         GPIO_NUM_3
-#define BUTTON_RIGHT        GPIO_NUM_4
-#define BUTTON_SPEED_UP     GPIO_NUM_10
-#define BUTTON_SPEED_DOWN   GPIO_NUM_11
+/* ── Joystick ────────────────────────────────────────────────────── */
+#define JOY_VRX_CHAN        ADC_CHANNEL_0   /* GPIO 1 */
+#define JOY_VRY_CHAN        ADC_CHANNEL_1   /* GPIO 2 */
+#define JOY_SW_PIN          GPIO_NUM_3
 
-#define SPEED_DEFAULT   30
-#define SPEED_MIN       30
-#define SPEED_MAX       100
-#define SPEED_STEP      30
+#define ADC_MAX             4095            /* 12-bit ADC */
+#define JOY_DEADZONE        300             /* centre dead-zone (raw counts) */
 
-static uint8_t current_speed = SPEED_DEFAULT;
+/* Speed modes cycled by SW button press */
+static const uint8_t speed_modes[] = { 30, 60, 100 };
+#define SPEED_MODE_COUNT    (sizeof(speed_modes) / sizeof(speed_modes[0]))
+static int  speed_mode_idx = 0;
+static uint8_t current_speed = 30;
+
+static adc_oneshot_unit_handle_t adc_handle;
 
 /* ── LED GPIOs ───────────────────────────────────────────────────── */
-#define LED_NOT_CONNECTED   GPIO_NUM_5
-#define LED_SPEED_1         GPIO_NUM_6   /* 30 %  */
-#define LED_SPEED_2         GPIO_NUM_7   /* 60 %  */
-#define LED_SPEED_3         GPIO_NUM_8   /* 100 % */
+#define LED_NOT_CONNECTED   GPIO_NUM_10
+#define LED_SPEED_1         GPIO_NUM_7   /* 30 %  */
+#define LED_SPEED_2         GPIO_NUM_8   /* 60 %  */
+#define LED_SPEED_3         GPIO_NUM_9   /* 100 % */
 
 static const gpio_num_t speed_leds[] = {
     LED_SPEED_1, LED_SPEED_2, LED_SPEED_3,
@@ -56,24 +59,42 @@ static uint8_t  own_addr_type;
 static int  gap_event_cb(struct ble_gap_event *event, void *arg);
 static void start_scan(void);
 
-/* ── GPIO ────────────────────────────────────────────────────────── */
-static void gpio_init_buttons(void)
+/* ── Joystick init ───────────────────────────────────────────────── */
+static void joystick_init(void)
 {
-    const gpio_num_t pins[] = {
-        BUTTON_FORWARD, BUTTON_BACKWARD,
-        BUTTON_LEFT,    BUTTON_RIGHT,
-        BUTTON_SPEED_UP, BUTTON_SPEED_DOWN,
+    /* ADC for VRX / VRY */
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id  = ADC_UNIT_1,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
     };
-    for (int i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
-        gpio_config_t cfg = {
-            .pin_bit_mask  = 1ULL << pins[i],
-            .mode          = GPIO_MODE_INPUT,
-            .pull_up_en    = GPIO_PULLUP_ENABLE,
-            .pull_down_en  = GPIO_PULLDOWN_DISABLE,
-            .intr_type     = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&cfg);
-    }
+    adc_oneshot_new_unit(&unit_cfg, &adc_handle);
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    adc_oneshot_config_channel(adc_handle, JOY_VRX_CHAN, &chan_cfg);
+    adc_oneshot_config_channel(adc_handle, JOY_VRY_CHAN, &chan_cfg);
+
+    /* SW button — active-low with internal pull-up */
+    gpio_config_t sw_cfg = {
+        .pin_bit_mask  = 1ULL << JOY_SW_PIN,
+        .mode          = GPIO_MODE_INPUT,
+        .pull_up_en    = GPIO_PULLUP_ENABLE,
+        .pull_down_en  = GPIO_PULLDOWN_DISABLE,
+        .intr_type     = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&sw_cfg);
+}
+
+/* Map raw ADC (0–4095) to -100…+100 with a centre dead-zone */
+static int joy_axis(adc_channel_t ch)
+{
+    int raw = 0;
+    adc_oneshot_read(adc_handle, ch, &raw);
+    int centered = raw - (ADC_MAX / 2);       /* -2048 … +2047 */
+    if (abs(centered) < JOY_DEADZONE) return 0;
+    return (int)((int32_t)centered * 100 / (ADC_MAX / 2));
 }
 
 static void gpio_init_leds(void)
@@ -97,8 +118,8 @@ static void gpio_init_leds(void)
 
 static void update_speed_leds(void)
 {
-    /* Each LED represents one 30 % step: 30%→1, 60%→2, 100%→3 */
-    int lit = current_speed / SPEED_STEP;
+    /* Each LED represents one speed mode: 30%→1, 60%→2, 100%→3 */
+    int lit = speed_mode_idx + 1;
     for (int i = 0; i < SPEED_LED_COUNT; i++)
         gpio_set_level(speed_leds[i], i < lit ? 1 : 0);
 }
@@ -107,8 +128,6 @@ static void update_connection_led(void)
 {
     gpio_set_level(LED_NOT_CONNECTED, connected ? 0 : 1);
 }
-
-static inline bool btn(gpio_num_t pin) { return gpio_get_level(pin) == 0; }
 
 /* ── BLE scanning (Coded PHY) ────────────────────────────────────── */
 static void start_scan(void)
@@ -269,39 +288,35 @@ static void host_task(void *param)
 /* ── Control-loop task ───────────────────────────────────────────── */
 static void control_task(void *param)
 {
-    bool su_prev = false, sd_prev = false;
+    bool sw_prev = true;   /* idle = high (pull-up) */
 
     for (;;) {
-        /* Speed adjustment — edge-triggered */
-        bool su = btn(BUTTON_SPEED_UP);
-        bool sd = btn(BUTTON_SPEED_DOWN);
-
-        if (su && !su_prev && current_speed < SPEED_MAX) {
-            current_speed += SPEED_STEP;
+        /* SW button — cycle speed mode on press (edge-triggered) */
+        bool sw = gpio_get_level(JOY_SW_PIN) == 0;
+        if (sw && !sw_prev) {
+            speed_mode_idx = (speed_mode_idx + 1) % SPEED_MODE_COUNT;
+            current_speed  = speed_modes[speed_mode_idx];
             update_speed_leds();
+            ESP_LOGI(TAG, "Speed mode %d (%u%%)", speed_mode_idx, current_speed);
         }
-        if (sd && !sd_prev && current_speed > SPEED_MIN) {
-            current_speed -= SPEED_STEP;
-            update_speed_leds();
-        }
+        sw_prev = sw;
 
-        su_prev = su;
-        sd_prev = sd;
+        /* Read joystick axes */
+        int x = joy_axis(JOY_VRX_CHAN);   /* left/right */
+        int y = joy_axis(JOY_VRY_CHAN);   /* forward/backward */
 
-        /* Direction from buttons */
-        bool fwd  = btn(BUTTON_FORWARD);
-        bool bwd  = btn(BUTTON_BACKWARD);
-        bool left = btn(BUTTON_LEFT);
-        bool rght = btn(BUTTON_RIGHT);
+        /* Clamp to -100…+100 */
+        if (x >  100) x =  100;
+        if (x < -100) x = -100;
+        if (y >  100) y =  100;
+        if (y < -100) y = -100;
 
         rc_command_t cmd = { .x = 0, .y = 0, .speed = 0 };
 
-        if (fwd || bwd || left || rght) {
+        if (x != 0 || y != 0) {
+            cmd.x     = (int8_t)x;
+            cmd.y     = (int8_t)y;
             cmd.speed = current_speed;
-            if (fwd)  cmd.y =  100;
-            if (bwd)  cmd.y = -100;
-            if (left)  cmd.x = -100;
-            if (rght)  cmd.x =  100;
         }
 
         /* Send command over BLE */
@@ -327,8 +342,8 @@ void remote_main(void)
         nvs_flash_init();
     }
 
-    /* GPIO */
-    gpio_init_buttons();
+    /* GPIO / ADC */
+    joystick_init();
     gpio_init_leds();
     update_speed_leds();
     update_connection_led();
