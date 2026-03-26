@@ -14,4 +14,6 @@ typedef struct __attribute__((packed)) {
     int8_t  x;      /* -100 (full left)     … +100 (full right)    */
     int8_t  y;      /* -100 (full backward) … +100 (full forward)  */
     uint8_t speed;  /*    0 (stop)          …  100 (full power)    */
+    int8_t  pan_x;  /* -100 (full left)     … +100 (full right)   servo */
+    int8_t  pan_y;  /* -100 (full down)     … +100 (full up)      servo */
 } rc_command_t;

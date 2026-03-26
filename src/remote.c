@@ -22,17 +22,24 @@
 
 static const char *TAG = "rc_remote";
 
-/* ── Joystick ────────────────────────────────────────────────────── */
+/* ── Joystick (drive) ────────────────────────────────────────────── */
 #define JOY_VRX_CHAN        ADC_CHANNEL_0   /* GPIO 1 */
 #define JOY_VRY_CHAN        ADC_CHANNEL_1   /* GPIO 2 */
 #define JOY_SW_PIN          GPIO_NUM_3
+
+/* ── Joystick (servo / pan-tilt) ─────────────────────────────────── */
+#define JOY2_VRX_CHAN       ADC_CHANNEL_3   /* GPIO 4 */
+#define JOY2_VRY_CHAN       ADC_CHANNEL_4   /* GPIO 5 */
+#define JOY2_SW_PIN         GPIO_NUM_6
 
 #define ADC_MAX             4095            /* 12-bit ADC */
 #define JOY_DEADZONE        200             /* centre dead-zone (raw counts) */
 #define JOY_CAL_SAMPLES     64              /* samples averaged for centre cal */
 
-static int joy_center_x = ADC_MAX / 2;
-static int joy_center_y = ADC_MAX / 2;
+static int joy_center_x  = ADC_MAX / 2;
+static int joy_center_y  = ADC_MAX / 2;
+static int joy2_center_x = ADC_MAX / 2;
+static int joy2_center_y = ADC_MAX / 2;
 
 /* Speed modes cycled by SW button press */
 static const uint8_t speed_modes[] = { 30, 60, 100 };
@@ -79,10 +86,12 @@ static void joystick_init(void)
     };
     adc_oneshot_config_channel(adc_handle, JOY_VRX_CHAN, &chan_cfg);
     adc_oneshot_config_channel(adc_handle, JOY_VRY_CHAN, &chan_cfg);
+    adc_oneshot_config_channel(adc_handle, JOY2_VRX_CHAN, &chan_cfg);
+    adc_oneshot_config_channel(adc_handle, JOY2_VRY_CHAN, &chan_cfg);
 
-    /* SW button — active-low with internal pull-up */
+    /* SW buttons — active-low with internal pull-up */
     gpio_config_t sw_cfg = {
-        .pin_bit_mask  = 1ULL << JOY_SW_PIN,
+        .pin_bit_mask  = (1ULL << JOY_SW_PIN) | (1ULL << JOY2_SW_PIN),
         .mode          = GPIO_MODE_INPUT,
         .pull_up_en    = GPIO_PULLUP_ENABLE,
         .pull_down_en  = GPIO_PULLDOWN_DISABLE,
@@ -105,8 +114,23 @@ static void joystick_calibrate(void)
     }
     joy_center_x = (int)(sum_x / JOY_CAL_SAMPLES);
     joy_center_y = (int)(sum_y / JOY_CAL_SAMPLES);
-    ESP_LOGI(TAG, "Joystick calibrated: center_x=%d  center_y=%d",
+    ESP_LOGI(TAG, "Joystick 1 calibrated: center_x=%d  center_y=%d",
              joy_center_x, joy_center_y);
+
+    /* Calibrate second joystick (servo) */
+    sum_x = 0; sum_y = 0;
+    for (int i = 0; i < JOY_CAL_SAMPLES; i++) {
+        int rx = 0, ry = 0;
+        adc_oneshot_read(adc_handle, JOY2_VRX_CHAN, &rx);
+        adc_oneshot_read(adc_handle, JOY2_VRY_CHAN, &ry);
+        sum_x += rx;
+        sum_y += ry;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    joy2_center_x = (int)(sum_x / JOY_CAL_SAMPLES);
+    joy2_center_y = (int)(sum_y / JOY_CAL_SAMPLES);
+    ESP_LOGI(TAG, "Joystick 2 calibrated: center_x=%d  center_y=%d",
+             joy2_center_x, joy2_center_y);
 }
 
 /* Map raw ADC to -100…+100 relative to calibrated centre */
@@ -115,7 +139,12 @@ static int joy_axis(adc_channel_t ch)
     int raw = 0;
     adc_oneshot_read(adc_handle, ch, &raw);
 
-    int center = (ch == JOY_VRX_CHAN) ? joy_center_x : joy_center_y;
+    int center;
+    if      (ch == JOY_VRX_CHAN)  center = joy_center_x;
+    else if (ch == JOY_VRY_CHAN)  center = joy_center_y;
+    else if (ch == JOY2_VRX_CHAN) center = joy2_center_x;
+    else                          center = joy2_center_y;
+
     int centered = raw - center;
 
     if (abs(centered) < JOY_DEADZONE) return 0;
@@ -337,17 +366,29 @@ static void control_task(void *param)
         ESP_LOGI(TAG, "[HW-504 RAW] VRx=%4d  VRy=%4d  SW=%d",
                  raw_x, raw_y, gpio_get_level(JOY_SW_PIN));
 
-        /* Read joystick axes */
+        /* Read drive joystick axes */
         int x = joy_axis(JOY_VRX_CHAN);   /* left/right */
         int y = joy_axis(JOY_VRY_CHAN);   /* forward/backward */
 
-        /* Clamp to -100…+100 */
-        if (x >  100) x =  100;
-        if (x < -100) x = -100;
-        if (y >  100) y =  100;
-        if (y < -100) y = -100;
+        /* Read servo joystick axes */
+        int px = joy_axis(JOY2_VRX_CHAN); /* servo left/right */
+        int py = joy_axis(JOY2_VRY_CHAN); /* servo up/down */
 
-        rc_command_t cmd = { .x = 0, .y = 0, .speed = 0 };
+        /* Clamp to -100…+100 */
+        if (x  >  100) x  =  100;
+        if (x  < -100) x  = -100;
+        if (y  >  100) y  =  100;
+        if (y  < -100) y  = -100;
+        if (px >  100) px =  100;
+        if (px < -100) px = -100;
+        if (py >  100) py =  100;
+        if (py < -100) py = -100;
+
+        rc_command_t cmd = {
+            .x     = 0, .y     = 0, .speed = 0,
+            .pan_x = (int8_t)px,
+            .pan_y = (int8_t)py,
+        };
 
         if (x != 0 || y != 0) {
             cmd.x     = (int8_t)x;
@@ -357,7 +398,8 @@ static void control_task(void *param)
 
         /* Send command over BLE */
         if (connected && chr_discovered) {
-            ESP_LOGI(TAG, "x=%+4d y=%+4d spd=%3u", cmd.x, cmd.y, cmd.speed);
+            ESP_LOGI(TAG, "x=%+4d y=%+4d spd=%3u pan_x=%+4d pan_y=%+4d",
+                     cmd.x, cmd.y, cmd.speed, cmd.pan_x, cmd.pan_y);
             ble_gattc_write_no_rsp_flat(conn_handle, cmd_chr_handle,
                                         &cmd, sizeof(cmd));
         }

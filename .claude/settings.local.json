@@ -19,7 +19,10 @@
       "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/bt/host/nimble -name *.h)",
       "Bash(grep -r \"BLE_LOG\\\\|NIMBLE_LOGD\\\\|NIMBLE_LOGI\" /c/Data/University/PM/project-v23e/.pio/build/car --include=*.h)",
       "Bash(find /c/Data/University/PM/project-v23e/.pio/build/car/esp-idf -name *.h -type f)",
-      "Bash(find /c/Data/University/PM/project-v23e -name *.md -o -name *.txt -o -name *.rst)"
+      "Bash(find /c/Data/University/PM/project-v23e -name *.md -o -name *.txt -o -name *.rst)",
+      "Bash(git log:*)",
+      "Bash(wc:*)",
+      "Bash(grep -E \"//|/\\\\*\")"
     ]
   }
 }

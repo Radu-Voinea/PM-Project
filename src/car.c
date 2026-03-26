@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "driver/ledc.h"
+#include "driver/mcpwm_prelude.h"
 
 /* NimBLE */
 #include "nimble/nimble_port.h"
@@ -22,21 +23,28 @@
 static const char *TAG = "rc_car";
 
 /* ── Motor GPIO pins (directly from the original layout) ─────────── */
-#define FRONT_LEFT_FORWARDS   GPIO_NUM_46 // left-h2-in2  // blue
-#define FRONT_LEFT_BACKWARDS  GPIO_NUM_47 // left-h2-in1  // red
-#define FRONT_RIGHT_FORWARDS  GPIO_NUM_35 // right-h2-in3 // brown
+#define FRONT_LEFT_BACKWARDS  GPIO_NUM_40 // left-h2-in1  // red
+#define FRONT_LEFT_FORWARDS   GPIO_NUM_41 // left-h2-in2  // blue
+#define REAR_LEFT_BACKWARDS   GPIO_NUM_48 // left-h2-in3  // purple
+#define REAR_LEFT_FORWARDS    GPIO_NUM_47 // left-h2-in4  // brown
+#define REAR_RIGHT_FORWARDS   GPIO_NUM_46 // right-h2-in2 // blue-black
+#define REAR_RIGHT_BACKWARDS  GPIO_NUM_45 // right-h2-in1 // gray
+#define FRONT_RIGHT_FORWARDS  GPIO_NUM_38 // right-h2-in3 // brown-black
 #define FRONT_RIGHT_BACKWARDS GPIO_NUM_21 // right-h2-in4 // green
-#define REAR_RIGHT_BACKWARDS  GPIO_NUM_37 // right-h2-in1 // gray
-#define REAR_RIGHT_FORWARDS   GPIO_NUM_36 // right-h2-in2 // blue
-#define REAR_LEFT_FORWARDS    GPIO_NUM_38 // left-h2-in4  // brown
-#define REAR_LEFT_BACKWARDS   GPIO_NUM_45 // left-h2-in3  // purple
 
-/* ── LEDC / PWM ──────────────────────────────────────────────────── */
+/* ── LEDC / PWM (motors) ─────────────────────────────────────────── */
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER      LEDC_TIMER_0
 #define LEDC_RES        LEDC_TIMER_10_BIT   /* 0 – 1023 */
 #define LEDC_FREQ_HZ    1000
 #define MAX_DUTY        ((1 << 10) - 1)     /* 1023 */
+
+/* ── Servo (MCPWM — 50 Hz) ───────────────────────────────────────── */
+#define SERVO_UD_PIN    GPIO_NUM_15         /* up-down servo   */
+#define SERVO_LR_PIN    GPIO_NUM_42         /* left-right servo */
+#define SERVO_MIN_US     500                /* 0°   pulse width  */
+#define SERVO_MID_US    1500                /* 90°  pulse width  */
+#define SERVO_MAX_US    2500                /* 180° pulse width  */
 
 typedef struct { gpio_num_t pin; ledc_channel_t ch; } motor_ch_t;
 
@@ -50,13 +58,13 @@ enum {
 
 static const motor_ch_t motors[MOTOR_COUNT] = {
     [M_FL_FWD] = { FRONT_LEFT_FORWARDS,    LEDC_CHANNEL_0 },
-    [M_FL_BWD] = { FRONT_LEFT_BACKWARDS,  LEDC_CHANNEL_1 },
+    [M_FL_BWD] = { FRONT_LEFT_BACKWARDS,   LEDC_CHANNEL_1 },
     [M_FR_FWD] = { FRONT_RIGHT_FORWARDS,   LEDC_CHANNEL_2 },
-    [M_FR_BWD] = { FRONT_RIGHT_BACKWARDS, LEDC_CHANNEL_3 },
-    [M_BL_FWD] = { REAR_LEFT_FORWARDS,  LEDC_CHANNEL_4 },
-    [M_BL_BWD] = { REAR_LEFT_BACKWARDS,   LEDC_CHANNEL_5 },
-    [M_BR_FWD] = { REAR_RIGHT_FORWARDS, LEDC_CHANNEL_6 },
-    [M_BR_BWD] = { REAR_RIGHT_BACKWARDS,  LEDC_CHANNEL_7 },
+    [M_FR_BWD] = { FRONT_RIGHT_BACKWARDS,  LEDC_CHANNEL_3 },
+    [M_BL_FWD] = { REAR_LEFT_FORWARDS,     LEDC_CHANNEL_4 },
+    [M_BL_BWD] = { REAR_LEFT_BACKWARDS,    LEDC_CHANNEL_5 },
+    [M_BR_FWD] = { REAR_RIGHT_FORWARDS,    LEDC_CHANNEL_6 },
+    [M_BR_BWD] = { REAR_RIGHT_BACKWARDS,   LEDC_CHANNEL_7 },
 };
 
 /* ── Motor helpers ───────────────────────────────────────────────── */
@@ -129,6 +137,81 @@ static void motors_drive(const rc_command_t *cmd)
     set_duty(M_BR_BWD, right < 0 ? r_pwm : 0);
 }
 
+/* ── Servo (MCPWM) ───────────────────────────────────────────────── */
+static mcpwm_cmpr_handle_t servo_ud_cmp;
+static mcpwm_cmpr_handle_t servo_lr_cmp;
+
+/* Map -100…+100 → servo pulse width in µs */
+static inline uint32_t servo_angle_to_us(int8_t val)
+{
+    /* val=-100 → SERVO_MIN_US,  val=0 → SERVO_MID_US,  val=+100 → SERVO_MAX_US */
+    return (uint32_t)(SERVO_MID_US + (int)val * (SERVO_MAX_US - SERVO_MIN_US) / 200);
+}
+
+static void servos_init(void)
+{
+    /* Timer — shared by both servos */
+    mcpwm_timer_handle_t timer = NULL;
+    mcpwm_timer_config_t timer_cfg = {
+        .group_id      = 0,
+        .clk_src       = MCPWM_TIMER_CLK_SRC_DEFAULT,
+        .resolution_hz = 1000000,          /* 1 MHz → 1 µs per tick */
+        .period_ticks  = 20000,            /* 20 ms → 50 Hz */
+        .count_mode    = MCPWM_TIMER_COUNT_MODE_UP,
+    };
+    mcpwm_new_timer(&timer_cfg, &timer);
+
+    /* Operator for up-down servo */
+    mcpwm_oper_handle_t oper_ud = NULL;
+    mcpwm_operator_config_t oper_cfg = { .group_id = 0 };
+    mcpwm_new_operator(&oper_cfg, &oper_ud);
+    mcpwm_operator_connect_timer(oper_ud, timer);
+
+    mcpwm_comparator_config_t cmp_cfg = { .flags.update_cmp_on_tez = true };
+    mcpwm_new_comparator(oper_ud, &cmp_cfg, &servo_ud_cmp);
+
+    mcpwm_gen_handle_t gen_ud = NULL;
+    mcpwm_generator_config_t gen_cfg_ud = { .gen_gpio_num = SERVO_UD_PIN };
+    mcpwm_new_generator(oper_ud, &gen_cfg_ud, &gen_ud);
+
+    mcpwm_generator_set_action_on_timer_event(gen_ud,
+        MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
+    mcpwm_generator_set_action_on_compare_event(gen_ud,
+        MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, servo_ud_cmp, MCPWM_GEN_ACTION_LOW));
+
+    /* Operator for left-right servo */
+    mcpwm_oper_handle_t oper_lr = NULL;
+    mcpwm_new_operator(&oper_cfg, &oper_lr);
+    mcpwm_operator_connect_timer(oper_lr, timer);
+
+    mcpwm_new_comparator(oper_lr, &cmp_cfg, &servo_lr_cmp);
+
+    mcpwm_gen_handle_t gen_lr = NULL;
+    mcpwm_generator_config_t gen_cfg_lr = { .gen_gpio_num = SERVO_LR_PIN };
+    mcpwm_new_generator(oper_lr, &gen_cfg_lr, &gen_lr);
+
+    mcpwm_generator_set_action_on_timer_event(gen_lr,
+        MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
+    mcpwm_generator_set_action_on_compare_event(gen_lr,
+        MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, servo_lr_cmp, MCPWM_GEN_ACTION_LOW));
+
+    /* Centre both servos and start the timer */
+    mcpwm_comparator_set_compare_value(servo_ud_cmp, SERVO_MID_US);
+    mcpwm_comparator_set_compare_value(servo_lr_cmp, SERVO_MID_US);
+
+    mcpwm_timer_enable(timer);
+    mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP);
+
+    ESP_LOGI(TAG, "Servos initialised (UD=GPIO%d, LR=GPIO%d)",
+             SERVO_UD_PIN, SERVO_LR_PIN);
+}
+
+static void servos_drive(const rc_command_t *cmd)
+{
+    mcpwm_comparator_set_compare_value(servo_ud_cmp, servo_angle_to_us(cmd->pan_y));
+    mcpwm_comparator_set_compare_value(servo_lr_cmp, servo_angle_to_us(cmd->pan_x));
+}
+
 /* ── BLE – GATT server (peripheral) ─────────────────────────────── */
 static uint16_t conn_handle  = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t cmd_chr_val_handle;
@@ -147,7 +230,9 @@ static int command_chr_access(uint16_t conn_handle, uint16_t attr_handle,
         if (len == sizeof(rc_command_t)) {
             os_mbuf_copydata(ctxt->om, 0, sizeof(cmd), &cmd);
             motors_drive(&cmd);
-            ESP_LOGI(TAG, "cmd x=%d y=%d spd=%u", cmd.x, cmd.y, cmd.speed);
+            servos_drive(&cmd);
+            ESP_LOGI(TAG, "cmd x=%d y=%d spd=%u pan_x=%d pan_y=%d",
+                     cmd.x, cmd.y, cmd.speed, cmd.pan_x, cmd.pan_y);
         }
         return 0;
     }
@@ -282,6 +367,9 @@ void car_main(void)
     /* Motors */
     ledc_init_motors();
     motors_all_stop();
+
+    /* Servos */
+    servos_init();
 
     /* NimBLE */
     ret = nimble_port_init();
