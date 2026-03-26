@@ -141,11 +141,23 @@ static void motors_drive(const rc_command_t *cmd)
 static mcpwm_cmpr_handle_t servo_ud_cmp;
 static mcpwm_cmpr_handle_t servo_lr_cmp;
 
-/* Map -100…+100 → servo pulse width in µs */
+/* Servo rate-control state — updated by BLE, consumed by servo task */
+#define SERVO_RATE       0.6f      /* position change per 10 ms tick at full deflection */
+static volatile int8_t servo_rate_x = 0;   /* latest joystick deflection */
+static volatile int8_t servo_rate_y = 0;
+static float servo_pos_x = 0.0f;  /* accumulated position -100 … +100 */
+static float servo_pos_y = 0.0f;
+
+/* Map -100…+100 (int) → servo pulse width in µs */
 static inline uint32_t servo_angle_to_us(int8_t val)
 {
-    /* val=-100 → SERVO_MIN_US,  val=0 → SERVO_MID_US,  val=+100 → SERVO_MAX_US */
     return (uint32_t)(SERVO_MID_US + (int)val * (SERVO_MAX_US - SERVO_MIN_US) / 200);
+}
+
+/* Map -100.0…+100.0 (float) → servo pulse width in µs — full 1 µs resolution */
+static inline uint32_t servo_float_to_us(float val)
+{
+    return (uint32_t)(SERVO_MID_US + val * (SERVO_MAX_US - SERVO_MIN_US) / 200.0f);
 }
 
 static void servos_init(void)
@@ -206,10 +218,32 @@ static void servos_init(void)
              SERVO_UD_PIN, SERVO_LR_PIN);
 }
 
-static void servos_drive(const rc_command_t *cmd)
+/* BLE callback just latches the joystick deflection */
+static void servos_set_rate(const rc_command_t *cmd)
 {
-    mcpwm_comparator_set_compare_value(servo_ud_cmp, servo_angle_to_us(cmd->pan_y));
-    mcpwm_comparator_set_compare_value(servo_lr_cmp, servo_angle_to_us(cmd->pan_x));
+    servo_rate_x = cmd->pan_x;
+    servo_rate_y = cmd->pan_y;
+}
+
+/* Fixed-rate task: smoothly accumulates servo position independent of BLE timing */
+static void servo_task(void *param)
+{
+    for (;;) {
+        int8_t rx = servo_rate_x;
+        int8_t ry = servo_rate_y;
+
+        servo_pos_x += (float)rx * SERVO_RATE / 100.0f;
+        servo_pos_y += (float)ry * SERVO_RATE / 100.0f;
+        if (servo_pos_x >  100.0f) servo_pos_x =  100.0f;
+        if (servo_pos_x < -100.0f) servo_pos_x = -100.0f;
+        if (servo_pos_y >  100.0f) servo_pos_y =  100.0f;
+        if (servo_pos_y < -100.0f) servo_pos_y = -100.0f;
+
+        mcpwm_comparator_set_compare_value(servo_lr_cmp, servo_float_to_us(servo_pos_x));
+        mcpwm_comparator_set_compare_value(servo_ud_cmp, servo_float_to_us(servo_pos_y));
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 /* ── BLE – GATT server (peripheral) ─────────────────────────────── */
@@ -230,7 +264,7 @@ static int command_chr_access(uint16_t conn_handle, uint16_t attr_handle,
         if (len == sizeof(rc_command_t)) {
             os_mbuf_copydata(ctxt->om, 0, sizeof(cmd), &cmd);
             motors_drive(&cmd);
-            servos_drive(&cmd);
+            servos_set_rate(&cmd);
             ESP_LOGI(TAG, "cmd x=%d y=%d spd=%u pan_x=%d pan_y=%d",
                      cmd.x, cmd.y, cmd.speed, cmd.pan_x, cmd.pan_y);
         }
@@ -324,6 +358,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "Disconnected — motors stopped");
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         motors_all_stop();
+        servo_rate_x = 0;
+        servo_rate_y = 0;
         start_advertising();
         break;
 
@@ -370,6 +406,7 @@ void car_main(void)
 
     /* Servos */
     servos_init();
+    xTaskCreate(servo_task, "servo", 2048, NULL, 5, NULL);
 
     /* NimBLE */
     ret = nimble_port_init();

@@ -34,6 +34,7 @@ static const char *TAG = "rc_remote";
 
 #define ADC_MAX             4095            /* 12-bit ADC */
 #define JOY_DEADZONE        200             /* centre dead-zone (raw counts) */
+#define JOY2_DEADZONE       350             /* larger dead-zone for servo joystick (ADC noise) */
 #define JOY_CAL_SAMPLES     64              /* samples averaged for centre cal */
 
 static int joy_center_x  = ADC_MAX / 2;
@@ -48,6 +49,7 @@ static int  speed_mode_idx = 0;
 static uint8_t current_speed = 30;
 
 static adc_oneshot_unit_handle_t adc_handle;
+
 
 /* ── LED GPIOs ───────────────────────────────────────────────────── */
 #define LED_NOT_CONNECTED   GPIO_NUM_10
@@ -147,7 +149,9 @@ static int joy_axis(adc_channel_t ch)
 
     int centered = raw - center;
 
-    if (abs(centered) < JOY_DEADZONE) return 0;
+    int deadzone = (ch == JOY2_VRX_CHAN || ch == JOY2_VRY_CHAN)
+                   ? JOY2_DEADZONE : JOY_DEADZONE;
+    if (abs(centered) < deadzone) return 0;
 
     /* Scale using the actual range on each side of centre */
     int range = (centered > 0) ? (ADC_MAX - center) : center;
@@ -370,11 +374,11 @@ static void control_task(void *param)
         int x = joy_axis(JOY_VRX_CHAN);   /* left/right */
         int y = joy_axis(JOY_VRY_CHAN);   /* forward/backward */
 
-        /* Read servo joystick axes */
+        /* Read servo joystick axes — sent as rate to car */
         int px = joy_axis(JOY2_VRX_CHAN); /* servo left/right */
         int py = joy_axis(JOY2_VRY_CHAN); /* servo up/down */
 
-        /* Clamp to -100…+100 */
+        /* Clamp all axes to -100…+100 */
         if (x  >  100) x  =  100;
         if (x  < -100) x  = -100;
         if (y  >  100) y  =  100;
