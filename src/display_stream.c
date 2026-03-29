@@ -263,9 +263,11 @@ static void display_task(void *arg)
         }
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(sock, SOL_SOCKET,  SO_KEEPALIVE, &flag, sizeof(flag));
 
-        /* Recv timeout: detect stalled connection faster */
-        struct timeval rcv_tv = { .tv_sec = 3, .tv_usec = 0 };
+        /* Recv timeout: 10 s gives the camera plenty of slack for the
+         * occasional slow frame while still catching a truly dead link. */
+        struct timeval rcv_tv = { .tv_sec = 10, .tv_usec = 0 };
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
 
         ESP_LOGI(TAG, "Stream connected");
@@ -286,8 +288,14 @@ static void display_task(void *arg)
             /* Read JPEG payload */
             if (!tcp_recv_all(sock, jpeg, jlen)) { alive = false; break; }
 
-            /* Decode JPEG → RGB565 (little-endian output) */
+            /* Decode JPEG → RGB565 (little-endian output).
+             * Mute the JPEG library's internal error log for the duration:
+             * the OV2640 occasionally emits internally-corrupt frames that
+             * pass SOI/EOI validation but fail the decoder (JDR_FMT1/6).
+             * We already handle the failure gracefully below. */
+            esp_log_level_set("JPEG", ESP_LOG_NONE);
             bool ok = jpg2rgb565(jpeg, jlen, rgb, JPG_SCALE_NONE);
+            esp_log_level_set("JPEG", ESP_LOG_ERROR);
 
             if (!ok) {
                 ESP_LOGW(TAG, "decode failed (%lu B)", (unsigned long)jlen);
@@ -310,6 +318,7 @@ static void display_task(void *arg)
 
         close(sock);
         ESP_LOGW(TAG, "Stream lost — reconnecting");
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 

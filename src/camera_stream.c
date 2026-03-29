@@ -218,7 +218,14 @@ static void stream_task(void *arg)
         if (client < 0) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
 
         int flag = 1;
-        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY,  &flag, sizeof(flag));
+        setsockopt(client, SOL_SOCKET,  SO_KEEPALIVE, &flag, sizeof(flag));
+
+        /* Send timeout: if the receiver disappears mid-frame, don't block
+         * forever — bail out and wait for a fresh connection. */
+        struct timeval snd_tv = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+
         ESP_LOGI(TAG, "Client connected");
 
         uint32_t sent = 0;
@@ -227,6 +234,16 @@ static void stream_task(void *arg)
         while (ok) {
             camera_fb_t *fb = esp_camera_fb_get();
             if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+            /* Validate JPEG: must start with SOI (FF D8) and end with EOI (FF D9) */
+            if (fb->len < 4 ||
+                fb->buf[0] != 0xFF || fb->buf[1] != 0xD8 ||
+                fb->buf[fb->len - 2] != 0xFF || fb->buf[fb->len - 1] != 0xD9)
+            {
+                ESP_LOGW(TAG, "bad JPEG frame %u B — skip", (unsigned)fb->len);
+                esp_camera_fb_return(fb);
+                continue;
+            }
 
             if (sent == 0) {
                 ESP_LOGI(TAG, "1st frame: %u B  hdr=%02X %02X %02X %02X",
