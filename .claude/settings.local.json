@@ -22,7 +22,19 @@
       "Bash(find /c/Data/University/PM/project-v23e -name *.md -o -name *.txt -o -name *.rst)",
       "Bash(git log:*)",
       "Bash(wc:*)",
-      "Bash(grep -E \"//|/\\\\*\")"
+      "Bash(grep -E \"//|/\\\\*\")",
+      "Bash(~/.platformio/penv/Scripts/pio run:*)",
+      "Bash(~/.platformio/penv/Scripts/python -m serial.tools.list_ports)",
+      "Bash(powershell.exe -Command \"Get-WMIObject Win32_SerialPort | Select DeviceID, Description\")",
+      "Bash(~/.platformio/penv/Scripts/python -m serial.tools.list_ports -v 2>&1)",
+      "Bash(git checkout:*)",
+      "Bash(~/.platformio/penv/Scripts/pio device:*)",
+      "Bash(timeout 15 ~/.platformio/penv/Scripts/python -m serial.tools.miniterm COM12 115200 --raw)",
+      "Bash(~/.platformio/penv/Scripts/platformio.exe run:*)",
+      "Bash(find /c/Data/University/PM/project-v23e -type d -name *libdeps* -o -type d -name *managed_components*)",
+      "Bash(find C:DataUniversityPMproject-v23e -name *esp32-camera* -o -name *camera* -type d)",
+      "Bash(find C:DataUniversityPMproject-v23emanaged_componentsespressif__esp32-camera -name *.c -type f)",
+      "Bash(find \"C:\\\\Data\\\\University\\\\PM\\\\project-v23e\\\\managed_components\\\\espressif__esp32-camera\" -name \"*.h\" -exec grep -l \"camera_config_t\" {})"
     ]
   }
 }

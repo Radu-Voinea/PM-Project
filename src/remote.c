@@ -2,6 +2,7 @@
 
 #include "remote.h"
 #include "ble_common.h"
+#include "display_stream.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -21,6 +22,9 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 static const char *TAG = "rc_remote";
+
+/* Set to 1 to enable verbose BLE/joystick/control logging */
+#define REMOTE_LOG_ENABLE  0
 
 /* ── Joystick (drive) ────────────────────────────────────────────── */
 #define JOY_VRX_CHAN        ADC_CHANNEL_0   /* GPIO 1 */
@@ -116,8 +120,10 @@ static void joystick_calibrate(void)
     }
     joy_center_x = (int)(sum_x / JOY_CAL_SAMPLES);
     joy_center_y = (int)(sum_y / JOY_CAL_SAMPLES);
+#if REMOTE_LOG_ENABLE
     ESP_LOGI(TAG, "Joystick 1 calibrated: center_x=%d  center_y=%d",
              joy_center_x, joy_center_y);
+#endif
 
     /* Calibrate second joystick (servo) */
     sum_x = 0; sum_y = 0;
@@ -131,8 +137,10 @@ static void joystick_calibrate(void)
     }
     joy2_center_x = (int)(sum_x / JOY_CAL_SAMPLES);
     joy2_center_y = (int)(sum_y / JOY_CAL_SAMPLES);
+#if REMOTE_LOG_ENABLE
     ESP_LOGI(TAG, "Joystick 2 calibrated: center_x=%d  center_y=%d",
              joy2_center_x, joy2_center_y);
+#endif
 }
 
 /* Map raw ADC to -100…+100 relative to calibrated centre */
@@ -196,8 +204,8 @@ static void start_scan(void)
 {
     struct ble_gap_ext_disc_params coded = {
         .passive = 0,
-        .itvl    = 0x40,
-        .window  = 0x40,
+        .itvl    = 0x100,   /* 160 ms — leave airtime for WiFi coex */
+        .window  = 0x40,    /*  40 ms scan per interval (~25% duty)  */
     };
 
     int rc = ble_gap_ext_disc(own_addr_type,
@@ -208,10 +216,12 @@ static void start_scan(void)
                               NULL,         /* skip 1 M scanning */
                               &coded,       /* Coded PHY */
                               gap_event_cb, NULL);
+#if REMOTE_LOG_ENABLE
     if (rc && rc != BLE_HS_EALREADY)
         ESP_LOGE(TAG, "ext_disc: %d", rc);
     else
         ESP_LOGI(TAG, "Scanning (Coded PHY)");
+#endif
 }
 
 /* ── GATT discovery callbacks ────────────────────────────────────── */
@@ -223,7 +233,9 @@ static int on_chr_disc(uint16_t c_handle,
         ble_uuid_u16(&chr->uuid.u) == RC_COMMAND_CHR_UUID) {
         cmd_chr_handle = chr->val_handle;
         chr_discovered = true;
+#if REMOTE_LOG_ENABLE
         ESP_LOGI(TAG, "Characteristic found  handle=%d", cmd_chr_handle);
+#endif
     }
     return 0;
 }
@@ -233,7 +245,9 @@ static int on_svc_disc(uint16_t c_handle,
                        const struct ble_gatt_svc *svc, void *arg)
 {
     if (error->status == 0) {
+#if REMOTE_LOG_ENABLE
         ESP_LOGI(TAG, "Service found — discovering chars");
+#endif
         ble_gattc_disc_all_chrs(c_handle,
                                 svc->start_handle, svc->end_handle,
                                 on_chr_disc, NULL);
@@ -263,7 +277,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         }
         if (!match) break;
 
+#if REMOTE_LOG_ENABLE
         ESP_LOGI(TAG, "Found RC-Car — connecting");
+#endif
         ble_gap_disc_cancel();
 
         struct ble_gap_conn_params cp = {
@@ -284,7 +300,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
                                      NULL, NULL, &cp,
                                      gap_event_cb, NULL);
         if (rc) {
+#if REMOTE_LOG_ENABLE
             ESP_LOGE(TAG, "ext_connect: %d", rc);
+#endif
             start_scan();
         }
         break;
@@ -296,7 +314,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             connected   = true;
             chr_discovered = false;
             update_connection_led();
+#if REMOTE_LOG_ENABLE
             ESP_LOGI(TAG, "Connected — discovering services");
+#endif
 
             ble_gap_set_prefered_le_phy(conn_handle,
                 BLE_GAP_LE_PHY_CODED_MASK,
@@ -307,7 +327,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             ble_gattc_disc_svc_by_uuid(conn_handle, &uuid.u,
                                        on_svc_disc, NULL);
         } else {
+#if REMOTE_LOG_ENABLE
             ESP_LOGW(TAG, "Connect failed: %d", event->connect.status);
+#endif
             connected = false;
             update_connection_led();
             start_scan();
@@ -315,7 +337,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_DISCONNECT:
+#if REMOTE_LOG_ENABLE
         ESP_LOGI(TAG, "Disconnected");
+#endif
         connected      = false;
         chr_discovered = false;
         conn_handle    = BLE_HS_CONN_HANDLE_NONE;
@@ -338,7 +362,9 @@ static void on_sync(void)
 
 static void on_reset(int reason)
 {
+#if REMOTE_LOG_ENABLE
     ESP_LOGW(TAG, "BLE host reset, reason=%d", reason);
+#endif
 }
 
 static void host_task(void *param)
@@ -359,16 +385,20 @@ static void control_task(void *param)
             speed_mode_idx = (speed_mode_idx + 1) % SPEED_MODE_COUNT;
             current_speed  = speed_modes[speed_mode_idx];
             update_speed_leds();
+#if REMOTE_LOG_ENABLE
             ESP_LOGI(TAG, "Speed mode %d (%u%%)", speed_mode_idx, current_speed);
+#endif
         }
         sw_prev = sw;
 
+#if REMOTE_LOG_ENABLE
         /* Read raw ADC values for debugging */
         int raw_x = 0, raw_y = 0;
         adc_oneshot_read(adc_handle, JOY_VRX_CHAN, &raw_x);
         adc_oneshot_read(adc_handle, JOY_VRY_CHAN, &raw_y);
         ESP_LOGI(TAG, "[HW-504 RAW] VRx=%4d  VRy=%4d  SW=%d",
                  raw_x, raw_y, gpio_get_level(JOY_SW_PIN));
+#endif
 
         /* Read drive joystick axes */
         int x = joy_axis(JOY_VRX_CHAN);   /* left/right */
@@ -402,8 +432,10 @@ static void control_task(void *param)
 
         /* Send command over BLE */
         if (connected && chr_discovered) {
+#if REMOTE_LOG_ENABLE
             ESP_LOGI(TAG, "x=%+4d y=%+4d spd=%3u pan_x=%+4d pan_y=%+4d",
                      cmd.x, cmd.y, cmd.speed, cmd.pan_x, cmd.pan_y);
+#endif
             ble_gattc_write_no_rsp_flat(conn_handle, cmd_chr_handle,
                                         &cmd, sizeof(cmd));
         }
@@ -415,7 +447,9 @@ static void control_task(void *param)
 /* ── Entry point ─────────────────────────────────────────────────── */
 void remote_main(void)
 {
+#if REMOTE_LOG_ENABLE
     ESP_LOGI(TAG, "RC Remote starting  (speed=%u%%)", current_speed);
+#endif
 
     /* NVS – required by NimBLE */
     esp_err_t ret = nvs_flash_init();
@@ -435,7 +469,9 @@ void remote_main(void)
     /* NimBLE */
     ret = nimble_port_init();
     if (ret != ESP_OK) {
+#if REMOTE_LOG_ENABLE
         ESP_LOGE(TAG, "nimble_port_init: 0x%x", ret);
+#endif
         return;
     }
 
@@ -449,6 +485,9 @@ void remote_main(void)
 
     /* Start button-polling / command-sending loop */
     xTaskCreate(control_task, "ctrl", 4096, NULL, 5, NULL);
+
+    /* Display + WiFi STA (video receive) — after BLE is up */
+    display_stream_init();
 }
 
 #endif /* BUILD_REMOTE */

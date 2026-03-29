@@ -2,6 +2,7 @@
 
 #include "car.h"
 #include "ble_common.h"
+#include "camera_stream.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -22,13 +23,16 @@
 
 static const char *TAG = "rc_car";
 
+/* Set to 1 to enable verbose motor/command logging */
+#define MOTOR_LOG_ENABLE  0
+
 /* ── Motor GPIO pins (directly from the original layout) ─────────── */
 #define FRONT_LEFT_BACKWARDS  GPIO_NUM_40 // left-h2-in1  // red
 #define FRONT_LEFT_FORWARDS   GPIO_NUM_41 // left-h2-in2  // blue
 #define REAR_LEFT_BACKWARDS   GPIO_NUM_48 // left-h2-in3  // purple
 #define REAR_LEFT_FORWARDS    GPIO_NUM_47 // left-h2-in4  // brown
-#define REAR_RIGHT_FORWARDS   GPIO_NUM_46 // right-h2-in2 // blue-black
-#define REAR_RIGHT_BACKWARDS  GPIO_NUM_45 // right-h2-in1 // gray
+#define REAR_RIGHT_FORWARDS   GPIO_NUM_43 // right-h2-in2 // blue-black
+#define REAR_RIGHT_BACKWARDS  GPIO_NUM_39 // right-h2-in1 // gray
 #define FRONT_RIGHT_FORWARDS  GPIO_NUM_38 // right-h2-in3 // brown-black
 #define FRONT_RIGHT_BACKWARDS GPIO_NUM_21 // right-h2-in4 // green
 
@@ -265,8 +269,10 @@ static int command_chr_access(uint16_t conn_handle, uint16_t attr_handle,
             os_mbuf_copydata(ctxt->om, 0, sizeof(cmd), &cmd);
             motors_drive(&cmd);
             servos_set_rate(&cmd);
+#if MOTOR_LOG_ENABLE
             ESP_LOGI(TAG, "cmd x=%d y=%d spd=%u pan_x=%d pan_y=%d",
                      cmd.x, cmd.y, cmd.speed, cmd.pan_x, cmd.pan_y);
+#endif
         }
         return 0;
     }
@@ -427,6 +433,9 @@ void car_main(void)
     ble_gatts_add_svcs(gatt_svcs);
 
     nimble_port_freertos_init(host_task);
+
+    /* Camera + WiFi AP (video stream) — after BLE is up */
+    camera_stream_init();
 }
 
 #endif /* BUILD_CAR */
