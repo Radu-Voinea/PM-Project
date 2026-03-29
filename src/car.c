@@ -50,25 +50,27 @@ static const char *TAG = "rc_car";
 #define SERVO_MID_US    1500                /* 90°  pulse width  */
 #define SERVO_MAX_US    2500                /* 180° pulse width  */
 
-typedef struct { gpio_num_t pin; ledc_channel_t ch; } motor_ch_t;
+/*
+ * Each LEDC channel drives two GPIO pins (front + rear of the same side/direction).
+ * Front and rear motors on the same side always carry identical duty, so they share
+ * one channel.  LEDC_CHANNEL_0 is reserved for camera XCLK (camera_stream.c)
+ * and must never be touched by motor code; motors use channels 1–4.
+ */
+typedef struct { gpio_num_t pin1; gpio_num_t pin2; ledc_channel_t ch; } motor_ch_t;
 
 enum {
-    M_FL_FWD, M_FL_BWD,
-    M_FR_FWD, M_FR_BWD,
-    M_BL_FWD, M_BL_BWD,
-    M_BR_FWD, M_BR_BWD,
-    MOTOR_COUNT
+    M_LEFT_FWD,
+    M_LEFT_BWD,
+    M_RIGHT_FWD,
+    M_RIGHT_BWD,
+    MOTOR_COUNT   /* = 4 */
 };
 
 static const motor_ch_t motors[MOTOR_COUNT] = {
-    [M_FL_FWD] = { FRONT_LEFT_FORWARDS,    LEDC_CHANNEL_0 },
-    [M_FL_BWD] = { FRONT_LEFT_BACKWARDS,   LEDC_CHANNEL_1 },
-    [M_FR_FWD] = { FRONT_RIGHT_FORWARDS,   LEDC_CHANNEL_2 },
-    [M_FR_BWD] = { FRONT_RIGHT_BACKWARDS,  LEDC_CHANNEL_3 },
-    [M_BL_FWD] = { REAR_LEFT_FORWARDS,     LEDC_CHANNEL_4 },
-    [M_BL_BWD] = { REAR_LEFT_BACKWARDS,    LEDC_CHANNEL_5 },
-    [M_BR_FWD] = { REAR_RIGHT_FORWARDS,    LEDC_CHANNEL_6 },
-    [M_BR_BWD] = { REAR_RIGHT_BACKWARDS,   LEDC_CHANNEL_7 },
+    [M_LEFT_FWD]  = { FRONT_LEFT_FORWARDS,   REAR_LEFT_FORWARDS,    LEDC_CHANNEL_1 },
+    [M_LEFT_BWD]  = { FRONT_LEFT_BACKWARDS,  REAR_LEFT_BACKWARDS,   LEDC_CHANNEL_2 },
+    [M_RIGHT_FWD] = { FRONT_RIGHT_FORWARDS,  REAR_RIGHT_FORWARDS,   LEDC_CHANNEL_3 },
+    [M_RIGHT_BWD] = { FRONT_RIGHT_BACKWARDS, REAR_RIGHT_BACKWARDS,  LEDC_CHANNEL_4 },
 };
 
 /* ── Motor helpers ───────────────────────────────────────────────── */
@@ -94,10 +96,13 @@ static void ledc_init_motors(void)
             .speed_mode = LEDC_MODE,
             .channel    = motors[i].ch,
             .timer_sel  = LEDC_TIMER,
-            .gpio_num   = motors[i].pin,
+            .gpio_num   = motors[i].pin1,
             .duty       = 0,
             .hpoint     = 0,
         };
+        ledc_channel_config(&ch);
+        /* Route the same channel signal to the second GPIO (front + rear share duty) */
+        ch.gpio_num = motors[i].pin2;
         ledc_channel_config(&ch);
     }
 }
@@ -128,17 +133,10 @@ static void motors_drive(const rc_command_t *cmd)
     uint32_t l_pwm = (uint32_t)(abs(left)  * cmd->speed * MAX_DUTY / 10000);
     uint32_t r_pwm = (uint32_t)(abs(right) * cmd->speed * MAX_DUTY / 10000);
 
-    /* left side */
-    set_duty(M_FL_FWD, left > 0 ? l_pwm : 0);
-    set_duty(M_FL_BWD, left < 0 ? l_pwm : 0);
-    set_duty(M_BL_FWD, left > 0 ? l_pwm : 0);
-    set_duty(M_BL_BWD, left < 0 ? l_pwm : 0);
-
-    /* right side */
-    set_duty(M_FR_FWD, right > 0 ? r_pwm : 0);
-    set_duty(M_FR_BWD, right < 0 ? r_pwm : 0);
-    set_duty(M_BR_FWD, right > 0 ? r_pwm : 0);
-    set_duty(M_BR_BWD, right < 0 ? r_pwm : 0);
+    set_duty(M_LEFT_FWD,  left  > 0 ? l_pwm : 0);
+    set_duty(M_LEFT_BWD,  left  < 0 ? l_pwm : 0);
+    set_duty(M_RIGHT_FWD, right > 0 ? r_pwm : 0);
+    set_duty(M_RIGHT_BWD, right < 0 ? r_pwm : 0);
 }
 
 /* ── Servo (MCPWM) ───────────────────────────────────────────────── */
