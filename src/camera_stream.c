@@ -120,9 +120,9 @@ static void camera_init(void)
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size   = FRAMESIZE_QVGA,     /* 320 x 240 */
         .jpeg_quality = 20,                  /* 0-63; higher = smaller frames, fewer UDP fragments */
-        .fb_count     = 1,
+        .fb_count     = 2,
         .fb_location  = CAMERA_FB_IN_PSRAM,
-        .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
+        .grab_mode    = CAMERA_GRAB_LATEST,
     };
 
     ESP_LOGI(TAG, "esp_camera_init  (PWDN=GPIO%d, XCLK=GPIO%d) ...",
@@ -142,22 +142,18 @@ static void camera_init(void)
      *  auto-exposure ON and steer brightness via ae_level instead.  */
     sensor_t *s = esp_camera_sensor_get();
     if (s) {
-        /* ── Manual exposure for consistent brightness ────────────── */
-        s->set_exposure_ctrl(s, 0);     /* AEC OFF — manual exposure   */
-        s->set_gain_ctrl(s, 0);         /* AGC OFF — manual gain       */
-        s->set_aec_value(s, 200);       /* exposure 0-1200 (low-mid)   */
-        s->set_agc_gain(s, 4);          /* gain 0-30 (low)             */
-
-        /* White balance auto */
-        s->set_whitebal(s, 1);
-        s->set_awb_gain(s, 1);
+        /* ── Auto exposure — let sensor handle light levels ───────── */
+        s->set_exposure_ctrl(s, 1);     /* AEC ON                      */
+        s->set_gain_ctrl(s, 1);         /* AGC ON                      */
+        s->set_ae_level(s, 1);          /* AE target: slightly bright  */
+        s->set_brightness(s, 1);        /* brightness +1               */
+        s->set_contrast(s, 1);          /* contrast +1                 */
+        s->set_whitebal(s, 1);          /* AWB ON                      */
+        s->set_awb_gain(s, 1);          /* AWB gain ON                 */
         s->set_wb_mode(s, 0);           /* auto WB                     */
+        s->set_gainceiling(s, GAINCEILING_4X);
 
-        /* DSP brightness +1, contrast +1 */
-        s->set_brightness(s, 0);
-        s->set_contrast(s, 0);
-
-        ESP_LOGI(TAG, "Sensor: manual AEC=400, gain=8, bright+1");
+        ESP_LOGI(TAG, "Sensor: auto AE+1, bright+1, contrast+1");
     }
 
     /* Let sensor settle after register writes */
@@ -238,13 +234,18 @@ static void stream_task(void *arg)
             pkt[3] = frag_cnt;
             memcpy(pkt + FRAG_HDR_LEN, fb->buf + offset, chunk);
 
-            int n = sendto(sock, pkt, FRAG_HDR_LEN + chunk, 0,
+            int n = -1;
+            for (int retry = 0; retry < 5; retry++) {
+                n = sendto(sock, pkt, FRAG_HDR_LEN + chunk, 0,
                            (struct sockaddr *)&dest, sizeof(dest));
-            if (n <= 0) ok = false;
+                if (n > 0) break;
+                vTaskDelay(pdMS_TO_TICKS(5));   /* back off, let TX drain */
+            }
+            if (n <= 0) { ok = false; break; }
             offset += chunk;
 
             /* Yield between fragments to let WiFi TX drain */
-            if (i < frag_cnt - 1) vTaskDelay(1);
+            if (i < frag_cnt - 1) vTaskDelay(pdMS_TO_TICKS(2));
         }
 
         esp_camera_fb_return(fb);
@@ -257,7 +258,7 @@ static void stream_task(void *arg)
         }
 
         frame_id++;
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 

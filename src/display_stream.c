@@ -182,8 +182,8 @@ static void lcd_init(void)
     d[0]=0x3E; d[1]=0x28;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
     d[0]=0x86;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
 
-    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=0 (RGB order)     */
-    d[0] = 0x60;                            lcd_cmd(0x36, d, 1);
+    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=1 (fix blue tint) */
+    d[0] = 0x68;                            lcd_cmd(0x36, d, 1);
 
     d[0] = 0x55;                            lcd_cmd(0x3A, d, 1);   /* 16-bit 565   */
     d[0]=0x00; d[1]=0x1B;                   lcd_cmd(0xB1, d, 2);   /* 70 Hz        */
@@ -255,9 +255,19 @@ static void display_task(void *arg)
     uint32_t frames = 0;
     int consec_fail = 0;
 
+    uint32_t pkts_rx = 0;
+
     for (;;) {
         int n = recv(sock, pkt, sizeof(pkt), 0);
-        if (n < (int)FRAG_HDR_LEN + 1) continue;
+        if (n < (int)FRAG_HDR_LEN + 1) {
+            if (n < 0) ESP_LOGW(TAG, "recv error: errno=%d", errno);
+            continue;
+        }
+        pkts_rx++;
+        if (pkts_rx <= 3)
+            ESP_LOGI(TAG, "pkt %lu: %d bytes, fid=%u fidx=%u fcnt=%u",
+                     (unsigned long)pkts_rx, n,
+                     ((uint16_t)pkt[0] << 8) | pkt[1], pkt[2], pkt[3]);
 
         uint16_t fid  = ((uint16_t)pkt[0] << 8) | pkt[1];
         uint8_t  fidx = pkt[2];
@@ -282,7 +292,34 @@ static void display_task(void *arg)
 
         if (frags_got < frags_need) continue;
 
-        /* ── Full frame assembled — decode ── */
+        /* ── Full frame assembled — drain stale packets then decode ── */
+        /* Use MSG_DONTWAIT to non-blocking drain queued packets,
+         * reassembling on-the-fly so we decode the latest frame.      */
+        {
+            int dn;
+            while ((dn = recv(sock, pkt, sizeof(pkt), MSG_DONTWAIT)) >= (int)FRAG_HDR_LEN + 1) {
+                uint16_t dfid  = ((uint16_t)pkt[0] << 8) | pkt[1];
+                uint8_t  dfidx = pkt[2];
+                uint8_t  dfcnt = pkt[3];
+                size_t   dplen = (size_t)dn - FRAG_HDR_LEN;
+
+                if (dfid != cur_frame) {
+                    cur_frame  = dfid;
+                    frags_need = dfcnt;
+                    frags_got  = 0;
+                    jpeg_len   = 0;
+                }
+                if (dfidx != frags_got || dfcnt != frags_need) continue;
+                if (jpeg_len + dplen > VIDEO_MAX_FRAME) continue;
+                memcpy(jpeg + jpeg_len, pkt + FRAG_HDR_LEN, dplen);
+                jpeg_len += dplen;
+                frags_got++;
+            }
+        }
+
+        /* If drain found a newer incomplete frame, wait for it next loop */
+        if (frags_got < frags_need) continue;
+
         esp_log_level_set("JPEG", ESP_LOG_NONE);
         bool ok = jpg2rgb565(jpeg, jpeg_len, rgb, JPG_SCALE_NONE);
         esp_log_level_set("JPEG", ESP_LOG_ERROR);
@@ -296,11 +333,23 @@ static void display_task(void *arg)
         }
         consec_fail = 0;
 
-        /* Byte-swap every pixel: LE → BE for ILI9341 */
+        /* Brighten + byte-swap every pixel for ILI9341 */
         for (size_t i = 0; i < LCD_FB; i += 2) {
-            uint8_t t = rgb[i];
-            rgb[i]    = rgb[i + 1];
-            rgb[i + 1] = t;
+            /* Decode RGB565 (little-endian from jpg2rgb565) */
+            uint16_t px = (uint16_t)rgb[i] | ((uint16_t)rgb[i + 1] << 8);
+            uint32_t r = (px >> 11) & 0x1F;
+            uint32_t g = (px >> 5)  & 0x3F;
+            uint32_t b =  px        & 0x1F;
+
+            /* Scale up by ~1.4x, clamp to max */
+            r = (r * 23) >> 4; if (r > 31) r = 31;   /* 23/16 ≈ 1.44 */
+            g = (g * 23) >> 4; if (g > 63) g = 63;
+            b = (b * 23) >> 4; if (b > 31) b = 31;
+
+            /* Re-pack as big-endian RGB565 for ILI9341 */
+            uint16_t out = (r << 11) | (g << 5) | b;
+            rgb[i]     = (uint8_t)(out >> 8);    /* BE high byte */
+            rgb[i + 1] = (uint8_t)(out & 0xFF);  /* BE low byte  */
         }
 
         lcd_flush(rgb);
