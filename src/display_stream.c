@@ -182,8 +182,8 @@ static void lcd_init(void)
     d[0]=0x3E; d[1]=0x28;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
     d[0]=0x86;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
 
-    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=1 (fix blue tint) */
-    d[0] = 0x68;                            lcd_cmd(0x36, d, 1);
+    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=0 (RGB order)     */
+    d[0] = 0x60;                            lcd_cmd(0x36, d, 1);
 
     d[0] = 0x55;                            lcd_cmd(0x3A, d, 1);   /* 16-bit 565   */
     d[0]=0x00; d[1]=0x1B;                   lcd_cmd(0xB1, d, 2);   /* 70 Hz        */
@@ -242,6 +242,10 @@ static void display_task(void *arg)
         ESP_LOGE(TAG, "bind() failed");
         close(sock); vTaskDelete(NULL); return;
     }
+
+    /* Set recv timeout so we never block forever */
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     ESP_LOGI(TAG, "Listening for UDP fragments on :%d", VIDEO_UDP_PORT);
 
@@ -333,23 +337,26 @@ static void display_task(void *arg)
         }
         consec_fail = 0;
 
-        /* Brighten + byte-swap every pixel for ILI9341 */
+        /* Brighten, swap R↔B, byte-swap to BE for ILI9341 */
         for (size_t i = 0; i < LCD_FB; i += 2) {
-            /* Decode RGB565 (little-endian from jpg2rgb565) */
+            /* Decode RGB565 little-endian from jpg2rgb565 */
             uint16_t px = (uint16_t)rgb[i] | ((uint16_t)rgb[i + 1] << 8);
             uint32_t r = (px >> 11) & 0x1F;
             uint32_t g = (px >> 5)  & 0x3F;
             uint32_t b =  px        & 0x1F;
 
-            /* Scale up by ~1.4x, clamp to max */
-            r = (r * 23) >> 4; if (r > 31) r = 31;   /* 23/16 ≈ 1.44 */
-            g = (g * 23) >> 4; if (g > 63) g = 63;
-            b = (b * 23) >> 4; if (b > 31) b = 31;
+            /* Swap R↔B to fix blue/green tint */
+            uint32_t tmp = r; r = b; b = tmp;
+
+            /* Scale up by ~1.2x, clamp to max */
+            r = (r * 19) >> 4; if (r > 31) r = 31;   /* 19/16 ≈ 1.19 */
+            g = (g * 19) >> 4; if (g > 63) g = 63;
+            b = (b * 19) >> 4; if (b > 31) b = 31;
 
             /* Re-pack as big-endian RGB565 for ILI9341 */
             uint16_t out = (r << 11) | (g << 5) | b;
-            rgb[i]     = (uint8_t)(out >> 8);    /* BE high byte */
-            rgb[i + 1] = (uint8_t)(out & 0xFF);  /* BE low byte  */
+            rgb[i]     = (uint8_t)(out >> 8);
+            rgb[i + 1] = (uint8_t)(out & 0xFF);
         }
 
         lcd_flush(rgb);
