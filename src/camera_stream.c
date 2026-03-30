@@ -142,14 +142,22 @@ static void camera_init(void)
      *  auto-exposure ON and steer brightness via ae_level instead.  */
     sensor_t *s = esp_camera_sensor_get();
     if (s) {
-        s->set_exposure_ctrl(s, 1);     /* auto-exposure ON            */
-        s->set_gain_ctrl(s, 1);         /* auto-gain ON                */
-        s->set_ae_level(s, 0);          /* AE target: neutral          */
-        s->set_brightness(s, 1);        /* brightness offset +1        */
-        s->set_whitebal(s, 1);          /* auto white-balance ON       */
-        s->set_awb_gain(s, 1);          /* AWB gain ON                 */
-        s->set_wb_mode(s, 0);           /* AWB mode: auto              */
-        ESP_LOGI(TAG, "Sensor: auto AE/AG/AWB, brightness=+1");
+        /* ── Manual exposure for consistent brightness ────────────── */
+        s->set_exposure_ctrl(s, 0);     /* AEC OFF — manual exposure   */
+        s->set_gain_ctrl(s, 0);         /* AGC OFF — manual gain       */
+        s->set_aec_value(s, 200);       /* exposure 0-1200 (low-mid)   */
+        s->set_agc_gain(s, 4);          /* gain 0-30 (low)             */
+
+        /* White balance auto */
+        s->set_whitebal(s, 1);
+        s->set_awb_gain(s, 1);
+        s->set_wb_mode(s, 0);           /* auto WB                     */
+
+        /* DSP brightness +1, contrast +1 */
+        s->set_brightness(s, 0);
+        s->set_contrast(s, 0);
+
+        ESP_LOGI(TAG, "Sensor: manual AEC=400, gain=8, bright+1");
     }
 
     /* Let sensor settle after register writes */
@@ -195,6 +203,10 @@ static void stream_task(void *arg)
 
     ESP_LOGI(TAG, "UDP target 192.168.4.2:%d (fragmented)", VIDEO_UDP_PORT);
 
+    /* Wait for remote to connect & get DHCP before blasting frames */
+    ESP_LOGI(TAG, "Waiting 8s for remote to connect...");
+    vTaskDelay(pdMS_TO_TICKS(8000));
+
     uint16_t frame_id = 0;
     uint32_t sent = 0;
 
@@ -231,7 +243,7 @@ static void stream_task(void *arg)
             if (n <= 0) ok = false;
             offset += chunk;
 
-            /* Yield between fragments to avoid starving camera DMA */
+            /* Yield between fragments to let WiFi TX drain */
             if (i < frag_cnt - 1) vTaskDelay(1);
         }
 
@@ -245,7 +257,7 @@ static void stream_task(void *arg)
         }
 
         frame_id++;
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 

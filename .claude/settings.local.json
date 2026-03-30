@@ -34,7 +34,9 @@
       "Bash(find /c/Data/University/PM/project-v23e -type d -name *libdeps* -o -type d -name *managed_components*)",
       "Bash(find C:DataUniversityPMproject-v23e -name *esp32-camera* -o -name *camera* -type d)",
       "Bash(find C:DataUniversityPMproject-v23emanaged_componentsespressif__esp32-camera -name *.c -type f)",
-      "Bash(find \"C:\\\\Data\\\\University\\\\PM\\\\project-v23e\\\\managed_components\\\\espressif__esp32-camera\" -name \"*.h\" -exec grep -l \"camera_config_t\" {})"
+      "Bash(find \"C:\\\\Data\\\\University\\\\PM\\\\project-v23e\\\\managed_components\\\\espressif__esp32-camera\" -name \"*.h\" -exec grep -l \"camera_config_t\" {})",
+      "Bash(~/.platformio/penv/Scripts/pio.exe run:*)",
+      "Bash(find /c/Data/University/PM/project-v23e -type f -name *.pio)"
     ]
   }
 }

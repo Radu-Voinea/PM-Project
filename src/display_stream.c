@@ -179,8 +179,8 @@ static void lcd_init(void)
     d[0]=0x00; d[1]=0x00;                   lcd_cmd(0xEA, d, 2);   /* Drv Timing B */
     d[0]=0x26;                              lcd_cmd(0xC0, d, 1);   /* Pwr Ctrl 1   */
     d[0]=0x11;                              lcd_cmd(0xC1, d, 1);   /* Pwr Ctrl 2   */
-    d[0]=0x35; d[1]=0x3E;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
-    d[0]=0xBE;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
+    d[0]=0x3E; d[1]=0x28;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
+    d[0]=0x86;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
 
     /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=0 (RGB order)     */
     d[0] = 0x60;                            lcd_cmd(0x36, d, 1);
