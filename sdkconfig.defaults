@@ -40,6 +40,10 @@ CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 # Allow WiFi/LWIP buffers in PSRAM
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
+# Enable IP reassembly so the remote can receive fragmented UDP datagrams
+CONFIG_LWIP_IP4_REASSEMBLY=y
+CONFIG_LWIP_IP_REASS_MAX_PBUFS=16
+
 # Camera: use PSRAM for DMA, reduce DMA buffer, disable unused sensors
 CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384
 CONFIG_CAMERA_PSRAM_DMA=y

@@ -119,8 +119,8 @@ static void camera_init(void)
         /* ── frame settings ── */
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size   = FRAMESIZE_QVGA,     /* 320 x 240 */
-        .jpeg_quality = 20,                  /* 0-63, lower = better */
-        .fb_count     = 2,
+        .jpeg_quality = 20,                  /* 0-63; higher = smaller frames, fewer UDP fragments */
+        .fb_count     = 1,
         .fb_location  = CAMERA_FB_IN_PSRAM,
         .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
     };
@@ -144,11 +144,12 @@ static void camera_init(void)
     if (s) {
         s->set_exposure_ctrl(s, 1);     /* auto-exposure ON            */
         s->set_gain_ctrl(s, 1);         /* auto-gain ON                */
-        s->set_ae_level(s, 2);          /* AE target: -2 dark … +2 bright */
-        s->set_brightness(s, 2);        /* brightness offset: -2 … +2 */
+        s->set_ae_level(s, 0);          /* AE target: neutral          */
+        s->set_brightness(s, 1);        /* brightness offset +1        */
         s->set_whitebal(s, 1);          /* auto white-balance ON       */
         s->set_awb_gain(s, 1);          /* AWB gain ON                 */
-        ESP_LOGI(TAG, "Sensor: auto AE/AG/AWB, ae_level=0, brightness=0");
+        s->set_wb_mode(s, 0);           /* AWB mode: auto              */
+        ESP_LOGI(TAG, "Sensor: auto AE/AG/AWB, brightness=+1");
     }
 
     /* Let sensor settle after register writes */
@@ -169,109 +170,82 @@ static void camera_init(void)
 
 }
 
-/* ── TCP helpers ────────────────────────────────────────────────── */
-
-static bool tcp_send_all(int fd, const void *buf, size_t len)
-{
-    const uint8_t *p = buf;
-    while (len) {
-        int n = send(fd, p, len, 0);
-        if (n <= 0) return false;
-        p   += n;
-        len -= (size_t)n;
-    }
-    return true;
-}
-
-/* ── Streaming task ─────────────────────────────────────────────── *
+/* ── UDP streaming task ────────────────────────────────────────── *
  *
- *  Protocol (per frame):
- *      [4 bytes — JPEG length, network byte order]
- *      [N bytes — raw JPEG payload]
+ *  Send JPEG frames as manually-fragmented UDP packets.
+ *  Each packet ≤ 1404 B (4-byte header + 1400 payload), so no
+ *  IP-level fragmentation is needed — much more reliable over WiFi.
  */
 static void stream_task(void *arg)
 {
-    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_fd < 0) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
         ESP_LOGE(TAG, "socket() failed");
         vTaskDelete(NULL); return;
     }
 
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {
+    struct sockaddr_in dest = {
         .sin_family      = AF_INET,
-        .sin_port        = htons(VIDEO_TCP_PORT),
-        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(VIDEO_UDP_PORT),
+        .sin_addr.s_addr = inet_addr("192.168.4.2"),
     };
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "bind() failed");
-        close(listen_fd); vTaskDelete(NULL); return;
-    }
-    listen(listen_fd, 1);
-    ESP_LOGI(TAG, "Listening on :%d", VIDEO_TCP_PORT);
+
+    /* Packet buffer on stack — fits one fragment */
+    uint8_t pkt[FRAG_PKT_LEN];
+
+    ESP_LOGI(TAG, "UDP target 192.168.4.2:%d (fragmented)", VIDEO_UDP_PORT);
+
+    uint16_t frame_id = 0;
+    uint32_t sent = 0;
 
     for (;;) {
-        ESP_LOGI(TAG, "Waiting for client ...");
-        int client = accept(listen_fd, NULL, NULL);
-        if (client < 0) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-        int flag = 1;
-        setsockopt(client, IPPROTO_TCP, TCP_NODELAY,  &flag, sizeof(flag));
-        setsockopt(client, SOL_SOCKET,  SO_KEEPALIVE, &flag, sizeof(flag));
-
-        /* Send timeout: if the receiver disappears mid-frame, don't block
-         * forever — bail out and wait for a fresh connection. */
-        struct timeval snd_tv = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
-
-        ESP_LOGI(TAG, "Client connected");
-
-        uint32_t sent = 0;
-        bool     ok   = true;
-
-        while (ok) {
-            camera_fb_t *fb = esp_camera_fb_get();
-            if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-
-            /* Validate JPEG: must start with SOI (FF D8) and end with EOI (FF D9) */
-            if (fb->len < 4 ||
-                fb->buf[0] != 0xFF || fb->buf[1] != 0xD8 ||
-                fb->buf[fb->len - 2] != 0xFF || fb->buf[fb->len - 1] != 0xD9)
-            {
-                ESP_LOGW(TAG, "bad JPEG frame %u B — skip", (unsigned)fb->len);
-                esp_camera_fb_return(fb);
-                continue;
-            }
-
-            if (sent == 0) {
-                ESP_LOGI(TAG, "1st frame: %u B  hdr=%02X %02X %02X %02X",
-                         (unsigned)fb->len,
-                         fb->buf[0], fb->buf[1],
-                         fb->len > 2 ? fb->buf[2] : 0,
-                         fb->len > 3 ? fb->buf[3] : 0);
-            }
-
-            uint32_t net_len = htonl((uint32_t)fb->len);
-            if (!tcp_send_all(client, &net_len, 4) ||
-                !tcp_send_all(client, fb->buf, fb->len))
-            {
-                ok = false;
-            }
-
+        /* Light validation */
+        if (fb->len < MIN_VALID_JPEG_LEN ||
+            fb->buf[0] != 0xFF || fb->buf[1] != 0xD8)
+        {
+            ESP_LOGW(TAG, "bad frame %u B — skip", (unsigned)fb->len);
             esp_camera_fb_return(fb);
-
-            if (ok) {
-                sent++;
-                if ((sent & 0x3F) == 0)
-                    ESP_LOGI(TAG, "Sent %lu frames", (unsigned long)sent);
-                taskYIELD();
-            }
+            continue;
         }
 
-        close(client);
-        ESP_LOGW(TAG, "Client gone after %lu frames", (unsigned long)sent);
+        /* Fragment and send */
+        uint8_t frag_cnt = (uint8_t)((fb->len + FRAG_MAX_PAYLOAD - 1) / FRAG_MAX_PAYLOAD);
+        size_t  offset = 0;
+        bool    ok = true;
+
+        for (uint8_t i = 0; i < frag_cnt && ok; i++) {
+            size_t chunk = fb->len - offset;
+            if (chunk > FRAG_MAX_PAYLOAD) chunk = FRAG_MAX_PAYLOAD;
+
+            pkt[0] = (uint8_t)(frame_id >> 8);
+            pkt[1] = (uint8_t)(frame_id & 0xFF);
+            pkt[2] = i;
+            pkt[3] = frag_cnt;
+            memcpy(pkt + FRAG_HDR_LEN, fb->buf + offset, chunk);
+
+            int n = sendto(sock, pkt, FRAG_HDR_LEN + chunk, 0,
+                           (struct sockaddr *)&dest, sizeof(dest));
+            if (n <= 0) ok = false;
+            offset += chunk;
+
+            /* Yield between fragments to avoid starving camera DMA */
+            if (i < frag_cnt - 1) vTaskDelay(1);
+        }
+
+        esp_camera_fb_return(fb);
+
+        if (ok) {
+            sent++;
+            if (sent <= 3 || (sent & 0x3F) == 0)
+                ESP_LOGI(TAG, "Sent %lu frames (%u B, %u frags)",
+                         (unsigned long)sent, (unsigned)offset, frag_cnt);
+        }
+
+        frame_id++;
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
 

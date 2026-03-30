@@ -117,12 +117,7 @@ static inline void lcd_cmd(uint8_t cmd, const uint8_t *p, size_t n)
 
 static void lcd_flush(const uint8_t *rgb565)
 {
-    uint8_t ca[] = { 0, 0, (LCD_W - 1) >> 8, (LCD_W - 1) & 0xFF };
-    lcd_cmd(0x2A, ca, 4);
-
-    uint8_t ra[] = { 0, 0, (LCD_H - 1) >> 8, (LCD_H - 1) & 0xFF };
-    lcd_cmd(0x2B, ra, 4);
-
+    /* 0x2A / 0x2B window set once at init — only send pixel data */
     esp_lcd_panel_io_tx_color(lcd_io, 0x2C, rgb565, LCD_FB);
     xSemaphoreTake(flush_sem, portMAX_DELAY);
 }
@@ -187,8 +182,8 @@ static void lcd_init(void)
     d[0]=0x35; d[1]=0x3E;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
     d[0]=0xBE;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
 
-    /* MADCTL: MV=1 (landscape) | BGR=0  (try RGB order)               */
-    d[0] = 0x20;                            lcd_cmd(0x36, d, 1);
+    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=0 (RGB order)     */
+    d[0] = 0x60;                            lcd_cmd(0x36, d, 1);
 
     d[0] = 0x55;                            lcd_cmd(0x3A, d, 1);   /* 16-bit 565   */
     d[0]=0x00; d[1]=0x1B;                   lcd_cmd(0xB1, d, 2);   /* 70 Hz        */
@@ -207,24 +202,16 @@ static void lcd_init(void)
     lcd_cmd(0x11, NULL, 0);   vTaskDelay(pdMS_TO_TICKS(120));  /* sleep out  */
     lcd_cmd(0x29, NULL, 0);                                     /* display on */
 
+    /* Set column/row window once — always full screen, never changes */
+    uint8_t ca[] = { 0, 0, (LCD_W - 1) >> 8, (LCD_W - 1) & 0xFF };
+    lcd_cmd(0x2A, ca, 4);
+    uint8_t ra[] = { 0, 0, (LCD_H - 1) >> 8, (LCD_H - 1) & 0xFF };
+    lcd_cmd(0x2B, ra, 4);
+
     ESP_LOGI(TAG, "ILI9341 ready  %dx%d landscape", LCD_W, LCD_H);
 }
 
-/* ── TCP helpers ────────────────────────────────────────────────── */
-
-static bool tcp_recv_all(int fd, void *buf, size_t len)
-{
-    uint8_t *p = buf;
-    while (len) {
-        int n = recv(fd, p, len, 0);
-        if (n <= 0) return false;
-        p   += n;
-        len -= (size_t)n;
-    }
-    return true;
-}
-
-/* ── Video receive / decode / display task ──────────────────────── */
+/* ── Video receive / decode / display task (UDP) ───────────────── */
 
 static void display_task(void *arg)
 {
@@ -239,86 +226,88 @@ static void display_task(void *arg)
         vTaskDelete(NULL); return;
     }
 
+    /* Create UDP socket and bind to listen port */
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed");
+        vTaskDelete(NULL); return;
+    }
+
+    struct sockaddr_in bind_addr = {
+        .sin_family      = AF_INET,
+        .sin_port        = htons(VIDEO_UDP_PORT),
+        .sin_addr.s_addr = INADDR_ANY,
+    };
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        ESP_LOGE(TAG, "bind() failed");
+        close(sock); vTaskDelete(NULL); return;
+    }
+
+    ESP_LOGI(TAG, "Listening for UDP fragments on :%d", VIDEO_UDP_PORT);
+
+    /* Fragment reassembly state */
+    uint8_t  pkt[FRAG_PKT_LEN];
+    uint16_t cur_frame  = 0xFFFF;
+    uint8_t  frags_need = 0;
+    uint8_t  frags_got  = 0;
+    size_t   jpeg_len   = 0;
+
     uint32_t frames = 0;
+    int consec_fail = 0;
 
     for (;;) {
-        /* ── connect to car ── */
-        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock < 0) {
-            ESP_LOGE(TAG, "socket() failed");
-            vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+        int n = recv(sock, pkt, sizeof(pkt), 0);
+        if (n < (int)FRAG_HDR_LEN + 1) continue;
+
+        uint16_t fid  = ((uint16_t)pkt[0] << 8) | pkt[1];
+        uint8_t  fidx = pkt[2];
+        uint8_t  fcnt = pkt[3];
+        size_t   plen = (size_t)n - FRAG_HDR_LEN;
+
+        /* New frame? Reset assembly. */
+        if (fid != cur_frame) {
+            cur_frame  = fid;
+            frags_need = fcnt;
+            frags_got  = 0;
+            jpeg_len   = 0;
         }
 
-        struct sockaddr_in srv = {
-            .sin_family      = AF_INET,
-            .sin_port        = htons(VIDEO_TCP_PORT),
-            .sin_addr.s_addr = inet_addr("192.168.4.1"),
-        };
+        /* Only accept in-order fragments for the current frame */
+        if (fidx != frags_got || fcnt != frags_need) continue;
 
-        ESP_LOGI(TAG, "Connecting to car ...");
-        if (connect(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
-            ESP_LOGW(TAG, "TCP connect failed — retry in 1 s");
-            close(sock);
-            vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+        if (jpeg_len + plen > VIDEO_MAX_FRAME) continue;
+        memcpy(jpeg + jpeg_len, pkt + FRAG_HDR_LEN, plen);
+        jpeg_len += plen;
+        frags_got++;
+
+        if (frags_got < frags_need) continue;
+
+        /* ── Full frame assembled — decode ── */
+        esp_log_level_set("JPEG", ESP_LOG_NONE);
+        bool ok = jpg2rgb565(jpeg, jpeg_len, rgb, JPG_SCALE_NONE);
+        esp_log_level_set("JPEG", ESP_LOG_ERROR);
+
+        if (!ok) {
+            consec_fail++;
+            if ((consec_fail & 0x1F) == 1)
+                ESP_LOGW(TAG, "decode failed (%u B) [%d consecutive]",
+                         (unsigned)jpeg_len, consec_fail);
+            continue;
         }
-        int flag = 1;
-        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-        setsockopt(sock, SOL_SOCKET,  SO_KEEPALIVE, &flag, sizeof(flag));
+        consec_fail = 0;
 
-        /* Recv timeout: 10 s gives the camera plenty of slack for the
-         * occasional slow frame while still catching a truly dead link. */
-        struct timeval rcv_tv = { .tv_sec = 10, .tv_usec = 0 };
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
-
-        ESP_LOGI(TAG, "Stream connected");
-
-        /* ── frame loop ── */
-        bool alive = true;
-        while (alive) {
-            /* Read 4-byte length header */
-            uint32_t net_len = 0;
-            if (!tcp_recv_all(sock, &net_len, 4)) { alive = false; break; }
-            uint32_t jlen = ntohl(net_len);
-
-            if (jlen == 0 || jlen > VIDEO_MAX_FRAME) {
-                ESP_LOGW(TAG, "bad frame len %lu", (unsigned long)jlen);
-                alive = false; break;
-            }
-
-            /* Read JPEG payload */
-            if (!tcp_recv_all(sock, jpeg, jlen)) { alive = false; break; }
-
-            /* Decode JPEG → RGB565 (little-endian output).
-             * Mute the JPEG library's internal error log for the duration:
-             * the OV2640 occasionally emits internally-corrupt frames that
-             * pass SOI/EOI validation but fail the decoder (JDR_FMT1/6).
-             * We already handle the failure gracefully below. */
-            esp_log_level_set("JPEG", ESP_LOG_NONE);
-            bool ok = jpg2rgb565(jpeg, jlen, rgb, JPG_SCALE_NONE);
-            esp_log_level_set("JPEG", ESP_LOG_ERROR);
-
-            if (!ok) {
-                ESP_LOGW(TAG, "decode failed (%lu B)", (unsigned long)jlen);
-                continue;
-            }
-
-            /* Byte-swap every pixel: LE → BE for ILI9341 */
-            for (size_t i = 0; i < LCD_FB; i += 2) {
-                uint8_t t = rgb[i];
-                rgb[i]    = rgb[i + 1];
-                rgb[i + 1] = t;
-            }
-
-            lcd_flush(rgb);
-            frames++;
-
-            if (frames <= 3 || (frames & 0x3F) == 0)
-                ESP_LOGI(TAG, "displayed %lu", (unsigned long)frames);
+        /* Byte-swap every pixel: LE → BE for ILI9341 */
+        for (size_t i = 0; i < LCD_FB; i += 2) {
+            uint8_t t = rgb[i];
+            rgb[i]    = rgb[i + 1];
+            rgb[i + 1] = t;
         }
 
-        close(sock);
-        ESP_LOGW(TAG, "Stream lost — reconnecting");
-        vTaskDelay(pdMS_TO_TICKS(500));
+        lcd_flush(rgb);
+        frames++;
+
+        if (frames <= 3 || (frames & 0x3F) == 0)
+            ESP_LOGI(TAG, "displayed %lu", (unsigned long)frames);
     }
 }
 
