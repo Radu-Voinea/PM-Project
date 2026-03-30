@@ -36,7 +36,14 @@
       "Bash(find C:DataUniversityPMproject-v23emanaged_componentsespressif__esp32-camera -name *.c -type f)",
       "Bash(find \"C:\\\\Data\\\\University\\\\PM\\\\project-v23e\\\\managed_components\\\\espressif__esp32-camera\" -name \"*.h\" -exec grep -l \"camera_config_t\" {})",
       "Bash(~/.platformio/penv/Scripts/pio.exe run:*)",
-      "Bash(find /c/Data/University/PM/project-v23e -type f -name *.pio)"
+      "Bash(find /c/Data/University/PM/project-v23e -type f -name *.pio)",
+      "Bash(~/.platformio/penv/Scripts/pio.exe device:*)",
+      "Bash(find /c/Data/University/PM/project-v23e -maxdepth 2 -type f \\\\\\(-name CMakeLists.txt -o -name Makefile -o -name sdkconfig* -o -name platformio.ini -o -name *.mk -o -name build.sh \\\\\\))",
+      "Bash(where.exe pio:*)",
+      "Bash(where.exe platformio:*)",
+      "Read(//c/Data/University/PM/project-v23e/$HOME/.platformio/penv/**)",
+      "Bash(export PATH=\"$HOME/.platformio/penv/Scripts:$PATH\")",
+      "Bash(pio device:*)"
     ]
   }
 }

@@ -152,7 +152,7 @@ static void lcd_init(void)
 
     esp_lcd_panel_io_i80_config_t io_cfg = {
         .cs_gpio_num       = LCD_CS,
-        .pclk_hz           = 8000000,
+        .pclk_hz           = 16000000,
         .trans_queue_depth  = 4,
         .on_color_trans_done = on_color_done,
         .dc_levels = {
@@ -244,8 +244,12 @@ static void display_task(void *arg)
     }
 
     /* Set recv timeout so we never block forever */
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Enlarge socket receive buffer to reduce packet drops */
+    int rxbuf = 32768;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
 
     ESP_LOGI(TAG, "Listening for UDP fragments on :%d", VIDEO_UDP_PORT);
 
@@ -263,10 +267,7 @@ static void display_task(void *arg)
 
     for (;;) {
         int n = recv(sock, pkt, sizeof(pkt), 0);
-        if (n < (int)FRAG_HDR_LEN + 1) {
-            if (n < 0) ESP_LOGW(TAG, "recv error: errno=%d", errno);
-            continue;
-        }
+        if (n < (int)FRAG_HDR_LEN + 1) continue;
         pkts_rx++;
         if (pkts_rx <= 3)
             ESP_LOGI(TAG, "pkt %lu: %d bytes, fid=%u fidx=%u fcnt=%u",
@@ -337,26 +338,34 @@ static void display_task(void *arg)
         }
         consec_fail = 0;
 
-        /* Brighten, swap R↔B, byte-swap to BE for ILI9341 */
-        for (size_t i = 0; i < LCD_FB; i += 2) {
-            /* Decode RGB565 little-endian from jpg2rgb565 */
-            uint16_t px = (uint16_t)rgb[i] | ((uint16_t)rgb[i + 1] << 8);
-            uint32_t r = (px >> 11) & 0x1F;
-            uint32_t g = (px >> 5)  & 0x3F;
-            uint32_t b =  px        & 0x1F;
+        /* Brighten, swap R↔B, byte-swap to BE for ILI9341.
+         * Uses precomputed LUTs to avoid per-pixel multiply+clamp. */
+        {
+            static uint8_t lut5[32];   /* 5-bit channels (R,B): x*19/16, clamped to 31 */
+            static uint8_t lut6[64];   /* 6-bit channel  (G):   x*19/16, clamped to 63 */
+            static bool luts_ready = false;
+            if (!luts_ready) {
+                for (int i = 0; i < 32; i++) {
+                    uint32_t v = (i * 19) >> 4;
+                    lut5[i] = v > 31 ? 31 : (uint8_t)v;
+                }
+                for (int i = 0; i < 64; i++) {
+                    uint32_t v = (i * 19) >> 4;
+                    lut6[i] = v > 63 ? 63 : (uint8_t)v;
+                }
+                luts_ready = true;
+            }
 
-            /* Swap R↔B to fix blue/green tint */
-            uint32_t tmp = r; r = b; b = tmp;
+            uint16_t *px16 = (uint16_t *)rgb;
+            for (size_t i = 0; i < LCD_PX; i++) {
+                uint16_t px = px16[i]; /* LE on ESP32, same as original */
 
-            /* Scale up by ~1.2x, clamp to max */
-            r = (r * 19) >> 4; if (r > 31) r = 31;   /* 19/16 ≈ 1.19 */
-            g = (g * 19) >> 4; if (g > 63) g = 63;
-            b = (b * 19) >> 4; if (b > 31) b = 31;
-
-            /* Re-pack as big-endian RGB565 for ILI9341 */
-            uint16_t out = (r << 11) | (g << 5) | b;
-            rgb[i]     = (uint8_t)(out >> 8);
-            rgb[i + 1] = (uint8_t)(out & 0xFF);
+                /* Extract, swap R↔B, brighten via LUT, repack as BE */
+                uint16_t out = ((uint16_t)lut5[px & 0x1F] << 11)
+                             | ((uint16_t)lut6[(px >> 5) & 0x3F] << 5)
+                             |  (uint16_t)lut5[(px >> 11) & 0x1F];
+                px16[i] = (out >> 8) | (out << 8);
+            }
         }
 
         lcd_flush(rgb);

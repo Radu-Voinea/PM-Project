@@ -119,7 +119,7 @@ static void camera_init(void)
         /* ── frame settings ── */
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size   = FRAMESIZE_QVGA,     /* 320 x 240 */
-        .jpeg_quality = 20,                  /* 0-63; higher = smaller frames, fewer UDP fragments */
+        .jpeg_quality = 30,                  /* 0-63; higher = smaller frames, fewer UDP fragments */
         .fb_count     = 2,
         .fb_location  = CAMERA_FB_IN_PSRAM,
         .grab_mode    = CAMERA_GRAB_LATEST,
@@ -140,49 +140,39 @@ static void camera_init(void)
     /* ── Sensor tuning ─────────────────────────────────────────────
      *  Disabling AEC/AGC kills frame output on this module, so keep
      *  auto-exposure ON and steer brightness via ae_level instead.  */
-    sensor_t *s = esp_camera_sensor_get();
-if (s) {
-    /* ── Exposure & Gain ──────────────────────────────────────── */
-	s->set_exposure_ctrl(s, 1);
-	s->set_aec2(s, 1);
-	s->set_ae_level(s, 2);               /* was 1 → bump to 2                */
-	s->set_aec_value(s, 600);            /* was 400 → higher seed            */
-	s->set_gain_ctrl(s, 1);
-	s->set_gainceiling(s, GAINCEILING_16X); /* was 8X → double it            */
-	s->set_agc_gain(s, 5);               /* give AGC a non-zero starting point */
+	sensor_t *s = esp_camera_sensor_get();
+	if (s) {
+		/* ── Manual exposure — slight bump up ───────────────────── */
+		s->set_exposure_ctrl(s, 0);
+		s->set_aec2(s, 0);
+		s->set_aec_value(s, 150);            /* was 50 → tripled      */
+		s->set_gain_ctrl(s, 0);
+		s->set_agc_gain(s, 2);               /* was 0 → tiny bump     */
 
-    /* ── White Balance ───────────────────────────────────────── */
-	s->set_whitebal(s, 1);
-	s->set_awb_gain(s, 1);
-	s->set_wb_mode(s, 0);                /* was 2 (fluorescent) → AUTO       */
-	/*  Fluorescent mode was adding warmth on top of already-warm bulbs      */
+		/* ── White Balance — fix green ───────────────────────────── */
+		s->set_whitebal(s, 1);
+		s->set_awb_gain(s, 1);
+		s->set_wb_mode(s, 3);                /* was 0 → incandescent, adds warmth to kill green */
 
-    /* ── Image Quality ───────────────────────────────────────── */
-    s->set_brightness(s, 1);             /* slight boost for indoor dims     */
-    s->set_contrast(s, 1);               /* +1 helps flat indoor lighting    */
-    s->set_saturation(s, 0);             /* neutral, avoid oversaturation    */
-    s->set_sharpness(s, 1);              /* edge crispness, indoor is blurry */
+		/* ── DSP ─────────────────────────────────────────────────── */
+		s->set_brightness(s, 0);             /* was -2 → back to neutral */
+		s->set_contrast(s, 1);
+		s->set_saturation(s, 0);
+		s->set_sharpness(s, 1);
+		s->set_denoise(s, 1);
+		s->set_lenc(s, 1);
+		s->set_raw_gma(s, 1);
+		s->set_dcw(s, 1);
+		s->set_bpc(s, 1);
+		s->set_wpc(s, 1);
 
-    /* ── Noise & Lens ────────────────────────────────────────── */
-    s->set_denoise(s, 1);                /* ON — indoor = more noise         */
-    s->set_lenc(s, 1);                   /* lens correction ON               */
-    s->set_raw_gma(s, 1);                /* gamma correction ON              */
-    s->set_dcw(s, 1);                    /* downsize EN for cleaner output   */
+		s->set_vflip(s, 0);
+		s->set_hmirror(s, 0);
 
-    /* ── Flip / Mirror (adjust to your mount) ───────────────── */
-    s->set_vflip(s, 0);
-    s->set_hmirror(s, 0);
+		ESP_LOGI(TAG, "Sensor: manual, aec=150 gain=2 incandescent WB");
+	}
 
-    /* ── Banding filter ─────────────────────────────────────── */
-    s->set_bpc(s, 1);                    /* bad pixel correction ON          */
-    s->set_wpc(s, 1);                    /* white pixel correction ON        */
-
-    ESP_LOGI(TAG, "Sensor: indoor optimised, fluorescent WB, 8X gain ceiling");
-}
-
-    /* Let sensor settle after register writes */
-    vTaskDelay(pdMS_TO_TICKS(500));
-
+	vTaskDelay(pdMS_TO_TICKS(1000));
     /* Flush warmup frames */
     for (int i = 0; i < 5; i++) {
         camera_fb_t *fb = esp_camera_fb_get();
@@ -269,7 +259,7 @@ static void stream_task(void *arg)
             offset += chunk;
 
             /* Yield between fragments to let WiFi TX drain */
-            if (i < frag_cnt - 1) vTaskDelay(pdMS_TO_TICKS(2));
+            if (i < frag_cnt - 1) vTaskDelay(pdMS_TO_TICKS(1));
         }
 
         esp_camera_fb_return(fb);
@@ -282,7 +272,7 @@ static void stream_task(void *arg)
         }
 
         frame_id++;
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
 
