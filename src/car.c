@@ -13,7 +13,6 @@
 #include "driver/ledc.h"
 #include "driver/mcpwm_prelude.h"
 
-/* NimBLE */
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -23,10 +22,8 @@
 
 static const char *TAG = "rc_car";
 
-/* Set to 1 to enable verbose motor/command logging */
 #define MOTOR_LOG_ENABLE  0
 
-/* ── Motor GPIO pins (directly from the original layout) ─────────── */
 #define FRONT_LEFT_BACKWARDS  GPIO_NUM_40 // left-h2-in1  // red
 #define FRONT_LEFT_FORWARDS   GPIO_NUM_41 // left-h2-in2  // blue
 #define REAR_LEFT_BACKWARDS   GPIO_NUM_48 // left-h2-in3  // purple
@@ -36,26 +33,18 @@ static const char *TAG = "rc_car";
 #define FRONT_RIGHT_FORWARDS  GPIO_NUM_38 // right-h2-in3 // brown-black
 #define FRONT_RIGHT_BACKWARDS GPIO_NUM_21 // right-h2-in4 // green
 
-/* ── LEDC / PWM (motors) ─────────────────────────────────────────── */
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER      LEDC_TIMER_0
-#define LEDC_RES        LEDC_TIMER_10_BIT   /* 0 – 1023 */
+#define LEDC_RES        LEDC_TIMER_10_BIT
 #define LEDC_FREQ_HZ    1000
-#define MAX_DUTY        ((1 << 10) - 1)     /* 1023 */
+#define MAX_DUTY        ((1 << 10) - 1)
 
-/* ── Servo (MCPWM — 50 Hz) ───────────────────────────────────────── */
 #define SERVO_UD_PIN    GPIO_NUM_15         /* up-down servo   */
 #define SERVO_LR_PIN    GPIO_NUM_42         /* left-right servo */
-#define SERVO_MIN_US     500                /* 0°   pulse width  */
-#define SERVO_MID_US    1500                /* 90°  pulse width  */
-#define SERVO_MAX_US    2500                /* 180° pulse width  */
+#define SERVO_MIN_US     500
+#define SERVO_MID_US    1500
+#define SERVO_MAX_US    2500
 
-/*
- * Each LEDC channel drives two GPIO pins (front + rear of the same side/direction).
- * Front and rear motors on the same side always carry identical duty, so they share
- * one channel.  LEDC_CHANNEL_0 is reserved for camera XCLK (camera_stream.c)
- * and must never be touched by motor code; motors use channels 1–4.
- */
 typedef struct { gpio_num_t pin1; gpio_num_t pin2; ledc_channel_t ch; } motor_ch_t;
 
 enum {
@@ -63,7 +52,7 @@ enum {
     M_LEFT_BWD,
     M_RIGHT_FWD,
     M_RIGHT_BWD,
-    MOTOR_COUNT   /* = 4 */
+    MOTOR_COUNT
 };
 
 static const motor_ch_t motors[MOTOR_COUNT] = {
@@ -73,7 +62,6 @@ static const motor_ch_t motors[MOTOR_COUNT] = {
     [M_RIGHT_BWD] = { FRONT_RIGHT_BACKWARDS, REAR_RIGHT_BACKWARDS,  LEDC_CHANNEL_4 },
 };
 
-/* ── Motor helpers ───────────────────────────────────────────────── */
 static void set_duty(int idx, uint32_t duty)
 {
     ledc_set_duty(LEDC_MODE, motors[idx].ch, duty);
@@ -101,7 +89,6 @@ static void ledc_init_motors(void)
             .hpoint     = 0,
         };
         ledc_channel_config(&ch);
-        /* Route the same channel signal to the second GPIO (front + rear share duty) */
         ch.gpio_num = motors[i].pin2;
         ledc_channel_config(&ch);
     }
@@ -113,11 +100,6 @@ static void motors_all_stop(void)
         set_duty(i, 0);
 }
 
-/*  Arcade-style differential drive.
- *  x : -100…+100   (left / right)
- *  y : -100…+100   (backward / forward)
- *  speed : 0…100   (power %)
- */
 static void motors_drive(const rc_command_t *cmd)
 {
     if (cmd->speed == 0) { motors_all_stop(); return; }
@@ -139,24 +121,20 @@ static void motors_drive(const rc_command_t *cmd)
     set_duty(M_RIGHT_BWD, right < 0 ? r_pwm : 0);
 }
 
-/* ── Servo (MCPWM) ───────────────────────────────────────────────── */
 static mcpwm_cmpr_handle_t servo_ud_cmp;
 static mcpwm_cmpr_handle_t servo_lr_cmp;
 
-/* Servo rate-control state — updated by BLE, consumed by servo task */
-#define SERVO_RATE       0.6f      /* position change per 10 ms tick at full deflection */
-static volatile int8_t servo_rate_x = 0;   /* latest joystick deflection */
+#define SERVO_RATE       0.6f
+static volatile int8_t servo_rate_x = 0;
 static volatile int8_t servo_rate_y = 0;
-static float servo_pos_x = 0.0f;  /* accumulated position -100 … +100 */
+static float servo_pos_x = 0.0f;
 static float servo_pos_y = 0.0f;
 
-/* Map -100…+100 (int) → servo pulse width in µs */
 static inline uint32_t servo_angle_to_us(int8_t val)
 {
     return (uint32_t)(SERVO_MID_US + (int)val * (SERVO_MAX_US - SERVO_MIN_US) / 200);
 }
 
-/* Map -100.0…+100.0 (float) → servo pulse width in µs — full 1 µs resolution */
 static inline uint32_t servo_float_to_us(float val)
 {
     return (uint32_t)(SERVO_MID_US + val * (SERVO_MAX_US - SERVO_MIN_US) / 200.0f);
@@ -164,18 +142,16 @@ static inline uint32_t servo_float_to_us(float val)
 
 static void servos_init(void)
 {
-    /* Timer — shared by both servos */
     mcpwm_timer_handle_t timer = NULL;
     mcpwm_timer_config_t timer_cfg = {
         .group_id      = 0,
         .clk_src       = MCPWM_TIMER_CLK_SRC_DEFAULT,
-        .resolution_hz = 1000000,          /* 1 MHz → 1 µs per tick */
-        .period_ticks  = 20000,            /* 20 ms → 50 Hz */
+        .resolution_hz = 1000000,
+        .period_ticks  = 20000,
         .count_mode    = MCPWM_TIMER_COUNT_MODE_UP,
     };
     mcpwm_new_timer(&timer_cfg, &timer);
 
-    /* Operator for up-down servo */
     mcpwm_oper_handle_t oper_ud = NULL;
     mcpwm_operator_config_t oper_cfg = { .group_id = 0 };
     mcpwm_new_operator(&oper_cfg, &oper_ud);
@@ -193,7 +169,6 @@ static void servos_init(void)
     mcpwm_generator_set_action_on_compare_event(gen_ud,
         MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, servo_ud_cmp, MCPWM_GEN_ACTION_LOW));
 
-    /* Operator for left-right servo */
     mcpwm_oper_handle_t oper_lr = NULL;
     mcpwm_new_operator(&oper_cfg, &oper_lr);
     mcpwm_operator_connect_timer(oper_lr, timer);
@@ -209,7 +184,6 @@ static void servos_init(void)
     mcpwm_generator_set_action_on_compare_event(gen_lr,
         MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, servo_lr_cmp, MCPWM_GEN_ACTION_LOW));
 
-    /* Centre both servos and start the timer */
     mcpwm_comparator_set_compare_value(servo_ud_cmp, SERVO_MID_US);
     mcpwm_comparator_set_compare_value(servo_lr_cmp, SERVO_MID_US);
 
@@ -220,14 +194,12 @@ static void servos_init(void)
              SERVO_UD_PIN, SERVO_LR_PIN);
 }
 
-/* BLE callback just latches the joystick deflection */
 static void servos_set_rate(const rc_command_t *cmd)
 {
     servo_rate_x = cmd->pan_x;
     servo_rate_y = cmd->pan_y;
 }
 
-/* Fixed-rate task: smoothly accumulates servo position independent of BLE timing */
 static void servo_task(void *param)
 {
     for (;;) {
@@ -248,7 +220,6 @@ static void servo_task(void *param)
     }
 }
 
-/* ── BLE – GATT server (peripheral) ─────────────────────────────── */
 static uint16_t conn_handle  = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t cmd_chr_val_handle;
 static uint8_t  own_addr_type;
@@ -256,7 +227,6 @@ static uint8_t  own_addr_type;
 static int  gap_event_cb(struct ble_gap_event *event, void *arg);
 static void start_advertising(void);
 
-/* Write-handler for the command characteristic */
 static int command_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -294,7 +264,6 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
     { 0 },
 };
 
-/* ── Extended advertising on Coded PHY ───────────────────────────── */
 static void start_advertising(void)
 {
     struct ble_gap_ext_adv_params params = {0};
@@ -307,22 +276,18 @@ static void start_advertising(void)
     int rc = ble_gap_ext_adv_configure(0, &params, NULL, gap_event_cb, NULL);
     if (rc) { ESP_LOGE(TAG, "ext_adv_configure: %d", rc); return; }
 
-    /* Build AD payload manually into an mbuf */
     struct os_mbuf *data = os_msys_get_pkthdr(BLE_HCI_MAX_EXT_ADV_DATA_LEN, 0);
     if (!data) { ESP_LOGE(TAG, "mbuf alloc failed"); return; }
 
-    /* Flags */
     uint8_t fl[] = { 0x02, BLE_HS_ADV_TYPE_FLAGS,
                      BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP };
     os_mbuf_append(data, fl, sizeof(fl));
 
-    /* Complete Local Name */
     uint8_t nlen = strlen(RC_DEVICE_NAME);
     uint8_t nhdr[] = { (uint8_t)(nlen + 1), BLE_HS_ADV_TYPE_COMP_NAME };
     os_mbuf_append(data, nhdr, sizeof(nhdr));
     os_mbuf_append(data, RC_DEVICE_NAME, nlen);
 
-    /* 16-bit Service UUID list */
     uint16_t svc = RC_SERVICE_UUID;
     uint8_t uhdr[] = { 0x03, BLE_HS_ADV_TYPE_COMP_UUIDS16 };
     os_mbuf_append(data, uhdr, sizeof(uhdr));
@@ -337,7 +302,6 @@ static void start_advertising(void)
     ESP_LOGI(TAG, "Advertising started (Coded PHY)");
 }
 
-/* ── GAP event handler ───────────────────────────────────────────── */
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -347,7 +311,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected  handle=%d", conn_handle);
 
-            /* Request Coded PHY for this connection */
             ble_gap_set_prefered_le_phy(conn_handle,
                 BLE_GAP_LE_PHY_CODED_MASK,
                 BLE_GAP_LE_PHY_CODED_MASK,
@@ -373,7 +336,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
-/* ── NimBLE host callbacks ───────────────────────────────────────── */
 static void on_sync(void)
 {
     ble_hs_id_infer_auto(0, &own_addr_type);
@@ -391,12 +353,10 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-/* ── Entry point ─────────────────────────────────────────────────── */
 void car_main(void)
 {
     ESP_LOGI(TAG, "RC Car starting");
 
-    /* NVS – required by NimBLE */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -404,15 +364,12 @@ void car_main(void)
         nvs_flash_init();
     }
 
-    /* Motors */
     ledc_init_motors();
     motors_all_stop();
 
-    /* Servos */
     servos_init();
     xTaskCreate(servo_task, "servo", 2048, NULL, 5, NULL);
 
-    /* NimBLE */
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init: 0x%x", ret);
@@ -432,7 +389,6 @@ void car_main(void)
 
     nimble_port_freertos_init(host_task);
 
-    /* Camera + WiFi AP (video stream) — after BLE is up */
     camera_stream_init();
 }
 

@@ -16,22 +16,6 @@
 static const char *TAG = "cam_tx";
 static bool camera_ok = false;
 
-/* ── OV2640 GPIO mapping ────────────────────────────────────────── *
- *
- *  Module: 18-pin OV2640 with onboard crystal oscillator.
- *
- *   Top row:  GND  SCL  SDA  D0  D2  D4  D6  DCLK  PWDN
- *   Bot row:  3V3  VSYNC HREF RST D1  D3  D5  D7    NC
- *
- *  PWDN is active-HIGH (HIGH = sleep).  The camera driver drives it
- *  LOW during init to wake the sensor.
- *
- *  The module likely has its own oscillator (NC pin on silkscreen),
- *  but we generate XCLK on GPIO 17 anyway — if the pin really is NC
- *  the signal is harmlessly ignored; if it turns out to be XCLK, the
- *  camera gets a clock.  Uses LEDC_CHANNEL_0 / TIMER_1 (motors are
- *  on channels 1-4 / TIMER_0, so no conflict).
- */
 #define CAM_PIN_SIOC    GPIO_NUM_7      /* SCL  */
 #define CAM_PIN_SIOD    GPIO_NUM_6      /* SDA  */
 #define CAM_PIN_D0      GPIO_NUM_5
@@ -48,8 +32,6 @@ static bool camera_ok = false;
 #define CAM_PIN_PWDN    GPIO_NUM_3
 #define CAM_PIN_RESET   GPIO_NUM_10
 #define CAM_PIN_XCLK    GPIO_NUM_17     /* wired to NC — generate anyway */
-
-/* ── WiFi Access Point ──────────────────────────────────────────── */
 
 static void wifi_ap_init(void)
 {
@@ -82,26 +64,20 @@ static void wifi_ap_init(void)
              VIDEO_WIFI_SSID, VIDEO_WIFI_CHANNEL);
 }
 
-/* ── Camera initialisation ──────────────────────────────────────── */
-
 static void camera_init(void)
 {
     camera_config_t cfg = {
-        /* ── control pins ── */
         .pin_pwdn     = CAM_PIN_PWDN,
         .pin_reset    = CAM_PIN_RESET,
 
-        /* ── XCLK: generate 20 MHz on GPIO 17 via LEDC ── */
         .pin_xclk     = CAM_PIN_XCLK,
         .xclk_freq_hz = 20000000,
-        .ledc_timer   = LEDC_TIMER_1,      /* TIMER_0 is motors          */
-        .ledc_channel = LEDC_CHANNEL_0,    /* motors use ch 1-4          */
+        .ledc_timer   = LEDC_TIMER_1,
+        .ledc_channel = LEDC_CHANNEL_0,
 
-        /* ── SCCB / I2C ── */
         .pin_sccb_sda = CAM_PIN_SIOD,
         .pin_sccb_scl = CAM_PIN_SIOC,
 
-        /* ── 8-bit parallel data bus ── */
         .pin_d7       = CAM_PIN_D7,
         .pin_d6       = CAM_PIN_D6,
         .pin_d5       = CAM_PIN_D5,
@@ -111,15 +87,13 @@ static void camera_init(void)
         .pin_d1       = CAM_PIN_D1,
         .pin_d0       = CAM_PIN_D0,
 
-        /* ── sync / clock ── */
         .pin_vsync    = CAM_PIN_VSYNC,
         .pin_href     = CAM_PIN_HREF,
         .pin_pclk     = CAM_PIN_PCLK,
 
-        /* ── frame settings ── */
         .pixel_format = PIXFORMAT_JPEG,
-        .frame_size   = FRAMESIZE_QVGA,     /* 320 x 240 */
-        .jpeg_quality = 30,                  /* 0-63; higher = smaller frames, fewer UDP fragments */
+        .frame_size   = FRAMESIZE_QVGA,
+        .jpeg_quality = 30,
         .fb_count     = 2,
         .fb_location  = CAMERA_FB_IN_PSRAM,
         .grab_mode    = CAMERA_GRAB_LATEST,
@@ -137,25 +111,19 @@ static void camera_init(void)
     camera_ok = true;
     ESP_LOGI(TAG, "Camera ready  (QVGA JPEG q=%d)", cfg.jpeg_quality);
 
-    /* ── Sensor tuning ─────────────────────────────────────────────
-     *  Disabling AEC/AGC kills frame output on this module, so keep
-     *  auto-exposure ON and steer brightness via ae_level instead.  */
 	sensor_t *s = esp_camera_sensor_get();
 	if (s) {
-		/* ── Manual exposure — slight bump up ───────────────────── */
 		s->set_exposure_ctrl(s, 0);
 		s->set_aec2(s, 0);
-		s->set_aec_value(s, 150);            /* was 50 → tripled      */
+		s->set_aec_value(s, 150);
 		s->set_gain_ctrl(s, 0);
-		s->set_agc_gain(s, 2);               /* was 0 → tiny bump     */
+		s->set_agc_gain(s, 2);
 
-		/* ── White Balance — fix green ───────────────────────────── */
 		s->set_whitebal(s, 1);
 		s->set_awb_gain(s, 1);
-		s->set_wb_mode(s, 3);                /* was 0 → incandescent, adds warmth to kill green */
+		s->set_wb_mode(s, 3);
 
-		/* ── DSP ─────────────────────────────────────────────────── */
-		s->set_brightness(s, 0);             /* was -2 → back to neutral */
+		s->set_brightness(s, 0);
 		s->set_contrast(s, 1);
 		s->set_saturation(s, 0);
 		s->set_sharpness(s, 1);
@@ -173,7 +141,6 @@ static void camera_init(void)
 	}
 
 	vTaskDelay(pdMS_TO_TICKS(1000));
-    /* Flush warmup frames */
     for (int i = 0; i < 5; i++) {
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb) {
@@ -188,12 +155,6 @@ static void camera_init(void)
 
 }
 
-/* ── UDP streaming task ────────────────────────────────────────── *
- *
- *  Send JPEG frames as manually-fragmented UDP packets.
- *  Each packet ≤ 1404 B (4-byte header + 1400 payload), so no
- *  IP-level fragmentation is needed — much more reliable over WiFi.
- */
 static void stream_task(void *arg)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -208,12 +169,10 @@ static void stream_task(void *arg)
         .sin_addr.s_addr = inet_addr("192.168.4.2"),
     };
 
-    /* Packet buffer on stack — fits one fragment */
     uint8_t pkt[FRAG_PKT_LEN];
 
     ESP_LOGI(TAG, "UDP target 192.168.4.2:%d (fragmented)", VIDEO_UDP_PORT);
 
-    /* Wait for remote to connect & get DHCP before blasting frames */
     ESP_LOGI(TAG, "Waiting 8s for remote to connect...");
     vTaskDelay(pdMS_TO_TICKS(8000));
 
@@ -224,7 +183,6 @@ static void stream_task(void *arg)
         camera_fb_t *fb = esp_camera_fb_get();
         if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-        /* Light validation */
         if (fb->len < MIN_VALID_JPEG_LEN ||
             fb->buf[0] != 0xFF || fb->buf[1] != 0xD8)
         {
@@ -233,7 +191,6 @@ static void stream_task(void *arg)
             continue;
         }
 
-        /* Fragment and send */
         uint8_t frag_cnt = (uint8_t)((fb->len + FRAG_MAX_PAYLOAD - 1) / FRAG_MAX_PAYLOAD);
         size_t  offset = 0;
         bool    ok = true;
@@ -253,12 +210,11 @@ static void stream_task(void *arg)
                 n = sendto(sock, pkt, FRAG_HDR_LEN + chunk, 0,
                            (struct sockaddr *)&dest, sizeof(dest));
                 if (n > 0) break;
-                vTaskDelay(pdMS_TO_TICKS(2));   /* brief back off */
+                vTaskDelay(pdMS_TO_TICKS(2));
             }
-            if (n <= 0) { ok = false; break; }  /* drop frame, move on */
+            if (n <= 0) { ok = false; break; }
             offset += chunk;
 
-            /* Yield between fragments to let WiFi TX drain */
             if (i < frag_cnt - 1) vTaskDelay(pdMS_TO_TICKS(1));
         }
 
@@ -275,8 +231,6 @@ static void stream_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
-
-/* ── Public entry point ─────────────────────────────────────────── */
 
 void camera_stream_init(void)
 {

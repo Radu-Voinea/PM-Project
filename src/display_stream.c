@@ -16,15 +16,10 @@
 #include "driver/gpio.h"
 #include "esp_lcd_panel_io.h"
 #include "lwip/sockets.h"
-#include "img_converters.h"             /* jpg2rgb565() from esp32-camera */
+#include "img_converters.h"
 
 static const char *TAG = "disp_rx";
 
-/* ── ILI9341 8080-parallel pin mapping ──────────────────────────── *
- *
- *  LCD_RD must be held HIGH (tie to 3.3 V) — the ESP-IDF i80 bus
- *  is write-only.  Backlight: wire to 3.3 V (or control via GPIO).
- */
 #define LCD_D0   GPIO_NUM_12
 #define LCD_D1   GPIO_NUM_11
 #define LCD_D2   GPIO_NUM_48
@@ -40,10 +35,8 @@ static const char *TAG = "disp_rx";
 
 #define LCD_W    320
 #define LCD_H    240
-#define LCD_PX   (LCD_W * LCD_H)        /* total pixels             */
-#define LCD_FB   (LCD_PX * 2)           /* frame-buffer bytes       */
-
-/* ── LCD globals ────────────────────────────────────────────────── */
+#define LCD_PX   (LCD_W * LCD_H)
+#define LCD_FB   (LCD_PX * 2)
 
 static esp_lcd_panel_io_handle_t lcd_io;
 static SemaphoreHandle_t         flush_sem;
@@ -56,8 +49,6 @@ static bool IRAM_ATTR on_color_done(esp_lcd_panel_io_handle_t io,
     xSemaphoreGiveFromISR(flush_sem, &woken);
     return woken == pdTRUE;
 }
-
-/* ── WiFi Station ───────────────────────────────────────────────── */
 
 static EventGroupHandle_t wifi_eg;
 #define WIFI_UP BIT0
@@ -108,8 +99,6 @@ static void wifi_sta_init(void)
     ESP_LOGI(TAG, "WiFi STA — connecting to \"%s\"", VIDEO_WIFI_SSID);
 }
 
-/* ── ILI9341 low-level ──────────────────────────────────────────── */
-
 static inline void lcd_cmd(uint8_t cmd, const uint8_t *p, size_t n)
 {
     esp_lcd_panel_io_tx_param(lcd_io, cmd, p, n);
@@ -117,14 +106,12 @@ static inline void lcd_cmd(uint8_t cmd, const uint8_t *p, size_t n)
 
 static void lcd_flush(const uint8_t *rgb565)
 {
-    /* 0x2A / 0x2B window set once at init — only send pixel data */
     esp_lcd_panel_io_tx_color(lcd_io, 0x2C, rgb565, LCD_FB);
     xSemaphoreTake(flush_sem, portMAX_DELAY);
 }
 
 static void lcd_init(void)
 {
-    /* Hard reset */
     gpio_config_t rc = {
         .pin_bit_mask = 1ULL << LCD_RST,
         .mode         = GPIO_MODE_OUTPUT,
@@ -133,7 +120,6 @@ static void lcd_init(void)
     gpio_set_level(LCD_RST, 0);  vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level(LCD_RST, 1);  vTaskDelay(pdMS_TO_TICKS(120));
 
-    /* Intel 8080 bus */
     esp_lcd_i80_bus_handle_t bus = NULL;
     esp_lcd_i80_bus_config_t bus_cfg = {
         .dc_gpio_num    = LCD_DC,
@@ -166,30 +152,28 @@ static void lcd_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(bus, &io_cfg, &lcd_io));
 
-    /* ── ILI9341 register init ─────────────────────────────────── */
     uint8_t d[16];
 
-    d[0]=0x00; d[1]=0x83; d[2]=0x30;       lcd_cmd(0xCF, d, 3);   /* Pwr Ctrl B   */
+    d[0]=0x00; d[1]=0x83; d[2]=0x30;       lcd_cmd(0xCF, d, 3);
     d[0]=0x64; d[1]=0x03; d[2]=0x12; d[3]=0x81;
-                                            lcd_cmd(0xED, d, 4);   /* Pwr On Seq   */
-    d[0]=0x85; d[1]=0x01; d[2]=0x79;       lcd_cmd(0xE8, d, 3);   /* Drv Timing A */
+                                            lcd_cmd(0xED, d, 4);
+    d[0]=0x85; d[1]=0x01; d[2]=0x79;       lcd_cmd(0xE8, d, 3);
     d[0]=0x39; d[1]=0x2C; d[2]=0x00; d[3]=0x34; d[4]=0x02;
-                                            lcd_cmd(0xCB, d, 5);   /* Pwr Ctrl A   */
-    d[0]=0x20;                              lcd_cmd(0xF7, d, 1);   /* Pump Ratio   */
-    d[0]=0x00; d[1]=0x00;                   lcd_cmd(0xEA, d, 2);   /* Drv Timing B */
-    d[0]=0x26;                              lcd_cmd(0xC0, d, 1);   /* Pwr Ctrl 1   */
-    d[0]=0x11;                              lcd_cmd(0xC1, d, 1);   /* Pwr Ctrl 2   */
-    d[0]=0x3E; d[1]=0x28;                   lcd_cmd(0xC5, d, 2);   /* VCOM 1       */
-    d[0]=0x86;                              lcd_cmd(0xC7, d, 1);   /* VCOM 2       */
+                                            lcd_cmd(0xCB, d, 5);
+    d[0]=0x20;                              lcd_cmd(0xF7, d, 1);
+    d[0]=0x00; d[1]=0x00;                   lcd_cmd(0xEA, d, 2);
+    d[0]=0x26;                              lcd_cmd(0xC0, d, 1);
+    d[0]=0x11;                              lcd_cmd(0xC1, d, 1);
+    d[0]=0x3E; d[1]=0x28;                   lcd_cmd(0xC5, d, 2);
+    d[0]=0x86;                              lcd_cmd(0xC7, d, 1);
 
-    /* MADCTL: MV=1 + MX=1 (landscape, 90° CW) | BGR=0 (RGB order)     */
     d[0] = 0x60;                            lcd_cmd(0x36, d, 1);
 
-    d[0] = 0x55;                            lcd_cmd(0x3A, d, 1);   /* 16-bit 565   */
-    d[0]=0x00; d[1]=0x1B;                   lcd_cmd(0xB1, d, 2);   /* 70 Hz        */
+    d[0] = 0x55;                            lcd_cmd(0x3A, d, 1);
+    d[0]=0x00; d[1]=0x1B;                   lcd_cmd(0xB1, d, 2);
 
-    d[0]=0x08;                              lcd_cmd(0xF2, d, 1);   /* 3-gamma off  */
-    d[0]=0x01;                              lcd_cmd(0x26, d, 1);   /* gamma set 1  */
+    d[0]=0x08;                              lcd_cmd(0xF2, d, 1);
+    d[0]=0x01;                              lcd_cmd(0x26, d, 1);
 
     { static const uint8_t pg[] = { 0x1F,0x1A,0x18,0x0A,0x0F,0x06,
             0x45,0x87,0x32,0x0A,0x07,0x02,0x07,0x05,0x00 };
@@ -199,10 +183,9 @@ static void lcd_init(void)
             0x3A,0x78,0x4D,0x05,0x18,0x0D,0x38,0x3A,0x1F };
       lcd_cmd(0xE1, ng, sizeof(ng)); }
 
-    lcd_cmd(0x11, NULL, 0);   vTaskDelay(pdMS_TO_TICKS(120));  /* sleep out  */
-    lcd_cmd(0x29, NULL, 0);                                     /* display on */
+    lcd_cmd(0x11, NULL, 0);   vTaskDelay(pdMS_TO_TICKS(120));
+    lcd_cmd(0x29, NULL, 0);
 
-    /* Set column/row window once — always full screen, never changes */
     uint8_t ca[] = { 0, 0, (LCD_W - 1) >> 8, (LCD_W - 1) & 0xFF };
     lcd_cmd(0x2A, ca, 4);
     uint8_t ra[] = { 0, 0, (LCD_H - 1) >> 8, (LCD_H - 1) & 0xFF };
@@ -211,14 +194,10 @@ static void lcd_init(void)
     ESP_LOGI(TAG, "ILI9341 ready  %dx%d landscape", LCD_W, LCD_H);
 }
 
-/* ── Video receive / decode / display task (UDP) ───────────────── */
-
 static void display_task(void *arg)
 {
-    /* Block until WiFi is associated */
     xEventGroupWaitBits(wifi_eg, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
 
-    /* Buffers in PSRAM */
     uint8_t *jpeg = heap_caps_malloc(VIDEO_MAX_FRAME, MALLOC_CAP_SPIRAM);
     uint8_t *rgb  = heap_caps_malloc(LCD_FB, MALLOC_CAP_SPIRAM);
     if (!jpeg || !rgb) {
@@ -226,7 +205,6 @@ static void display_task(void *arg)
         vTaskDelete(NULL); return;
     }
 
-    /* Create UDP socket and bind to listen port */
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "socket() failed");
@@ -243,17 +221,14 @@ static void display_task(void *arg)
         close(sock); vTaskDelete(NULL); return;
     }
 
-    /* Set recv timeout so we never block forever */
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Enlarge socket receive buffer to reduce packet drops */
     int rxbuf = 32768;
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rxbuf, sizeof(rxbuf));
 
     ESP_LOGI(TAG, "Listening for UDP fragments on :%d", VIDEO_UDP_PORT);
 
-    /* Fragment reassembly state */
     uint8_t  pkt[FRAG_PKT_LEN];
     uint16_t cur_frame  = 0xFFFF;
     uint8_t  frags_need = 0;
@@ -279,7 +254,6 @@ static void display_task(void *arg)
         uint8_t  fcnt = pkt[3];
         size_t   plen = (size_t)n - FRAG_HDR_LEN;
 
-        /* New frame? Reset assembly. */
         if (fid != cur_frame) {
             cur_frame  = fid;
             frags_need = fcnt;
@@ -287,7 +261,6 @@ static void display_task(void *arg)
             jpeg_len   = 0;
         }
 
-        /* Only accept in-order fragments for the current frame */
         if (fidx != frags_got || fcnt != frags_need) continue;
 
         if (jpeg_len + plen > VIDEO_MAX_FRAME) continue;
@@ -297,9 +270,6 @@ static void display_task(void *arg)
 
         if (frags_got < frags_need) continue;
 
-        /* ── Full frame assembled — drain stale packets then decode ── */
-        /* Use MSG_DONTWAIT to non-blocking drain queued packets,
-         * reassembling on-the-fly so we decode the latest frame.      */
         {
             int dn;
             while ((dn = recv(sock, pkt, sizeof(pkt), MSG_DONTWAIT)) >= (int)FRAG_HDR_LEN + 1) {
@@ -322,7 +292,6 @@ static void display_task(void *arg)
             }
         }
 
-        /* If drain found a newer incomplete frame, wait for it next loop */
         if (frags_got < frags_need) continue;
 
         esp_log_level_set("JPEG", ESP_LOG_NONE);
@@ -338,11 +307,9 @@ static void display_task(void *arg)
         }
         consec_fail = 0;
 
-        /* Brighten, swap R↔B, byte-swap to BE for ILI9341.
-         * Uses precomputed LUTs to avoid per-pixel multiply+clamp. */
         {
-            static uint8_t lut5[32];   /* 5-bit channels (R,B): x*19/16, clamped to 31 */
-            static uint8_t lut6[64];   /* 6-bit channel  (G):   x*19/16, clamped to 63 */
+            static uint8_t lut5[32];
+            static uint8_t lut6[64];
             static bool luts_ready = false;
             if (!luts_ready) {
                 for (int i = 0; i < 32; i++) {
@@ -358,9 +325,8 @@ static void display_task(void *arg)
 
             uint16_t *px16 = (uint16_t *)rgb;
             for (size_t i = 0; i < LCD_PX; i++) {
-                uint16_t px = px16[i]; /* LE on ESP32, same as original */
+                uint16_t px = px16[i];
 
-                /* Extract, swap R↔B, brighten via LUT, repack as BE */
                 uint16_t out = ((uint16_t)lut5[px & 0x1F] << 11)
                              | ((uint16_t)lut6[(px >> 5) & 0x3F] << 5)
                              |  (uint16_t)lut5[(px >> 11) & 0x1F];
@@ -376,22 +342,19 @@ static void display_task(void *arg)
     }
 }
 
-/* ── Public entry point ─────────────────────────────────────────── */
-
 void display_stream_init(void)
 {
     lcd_init();
 
-    /* Show red / green / blue test bars (RGB565 big-endian) */
     {
         uint8_t *tb = heap_caps_malloc(LCD_FB, MALLOC_CAP_SPIRAM);
         if (tb) {
             for (int y = 0; y < LCD_H; y++) {
                 for (int x = 0; x < LCD_W; x++) {
                     uint16_t c;
-                    if      (x < LCD_W / 3)     c = 0xF800;    /* red   */
-                    else if (x < 2 * LCD_W / 3) c = 0x07E0;    /* green */
-                    else                         c = 0x001F;    /* blue  */
+                    if      (x < LCD_W / 3)     c = 0xF800;
+                    else if (x < 2 * LCD_W / 3) c = 0x07E0;
+                    else                         c = 0x001F;
                     size_t off = (y * LCD_W + x) * 2;
                     tb[off]     = c >> 8;
                     tb[off + 1] = c & 0xFF;
