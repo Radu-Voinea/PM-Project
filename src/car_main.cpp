@@ -16,37 +16,42 @@
  *  Pin Definitions
  * ================================================================ */
 
-// ---- Camera ----
-#define CAM_PIN_PWDN    3       // GPIO 3 is strapping (JTAG source) — low risk
-#define CAM_PIN_RESET   -1      // No reset pin — module has internal POR
-#define CAM_PIN_XCLK    -1      // Dummy — onboard oscillator (moved from 15 for servo)
-#define CAM_PIN_SIOD    6
-#define CAM_PIN_SIOC    7
+// ---- Camera (U2 → U24 OV2640) ----
+#define CAM_PIN_PWDN    -1      // Tied to GND on PCB
+#define CAM_PIN_RESET   -1      // Tied to GND on PCB
+#define CAM_PIN_XCLK    -1      // Onboard oscillator
+#define CAM_PIN_SIOD    6       // SDA
+#define CAM_PIN_SIOC    7       // SCL
 #define CAM_PIN_D0      5
-#define CAM_PIN_D1      11
+#define CAM_PIN_D1      10
 #define CAM_PIN_D2      4
-#define CAM_PIN_D3      12
-#define CAM_PIN_D4      16
-#define CAM_PIN_D5      13
+#define CAM_PIN_D3      11
+#define CAM_PIN_D4      3       // GPIO3 strapping (JTAG) — input-only after boot, fine for cam data
+#define CAM_PIN_D5      12
 #define CAM_PIN_D6      2
-#define CAM_PIN_D7      14
+#define CAM_PIN_D7      13
 #define CAM_PIN_VSYNC   8
 #define CAM_PIN_HREF    9
-#define CAM_PIN_PCLK    1
+#define CAM_PIN_PCLK    1       // DCLK
 
-// ---- Motor H-bridge (4 motors, 2 pins each) ----
-#define MOTOR_FL_FWD    41      // Front-Left  forward
-#define MOTOR_FL_BWD    40      // Front-Left  backward
-#define MOTOR_RL_FWD    18      // Rear-Left   forward  (was 47 — slow LOW transition)
-#define MOTOR_RL_BWD    17      // Rear-Left   backward (was 48 — not in safe list)
-#define MOTOR_FR_FWD    38      // Front-Right forward
-#define MOTOR_FR_BWD    15      // Front-Right backward (was 21 — slow LOW transition)
-#define MOTOR_RR_FWD    10      // Rear-Right  forward  (was 43 — not in safe list)
-#define MOTOR_RR_BWD    47      // Rear-Right  backward (was 39 — goes HIGH after reset)
+// ---- Motor H-bridge right (U2 → U18) ----
+#define MOTOR_RR_BWD    39      // U18 IN1
+#define MOTOR_RR_FWD    40      // U18 IN2
+#define MOTOR_FR_FWD    41      // U18 IN3
+#define MOTOR_FR_BWD    42      // U18 IN4
 
-// ---- Servo (camera mount) ----
-#define SERVO_UD_PIN    42      // Up-Down   (was 15 — now used for motor; slow LOW OK for servo)
-#define SERVO_LR_PIN    39      // Left-Right (was 42; HIGH after reset = out-of-range pulse, servo ignores until MCPWM starts)
+// ---- Motor H-bridge left (U2 → U19) ----
+#define MOTOR_FL_BWD    47      // U19 IN1
+#define MOTOR_FL_FWD    38      // U19 IN2
+#define MOTOR_RL_BWD    18      // U19 IN3
+#define MOTOR_RL_FWD    17      // U19 IN4
+
+// ---- Servos (U2 → U20/U21) ----
+#define SERVO_UD_PIN    15      // U20 SG90 up-down
+#define SERVO_LR_PIN    16      // U21 SG90 left-right
+
+// ---- Error LED (U2 → U22/U23) ----
+#define LED_ERR_PIN     14      // U22 ERR_R → U23 ERR LED
 
 /* ================================================================
  *  LEDC motor configuration
@@ -244,18 +249,32 @@ static void servoTask(void *) {
 }
 
 /* ================================================================
+ *  Error LED
+ * ================================================================ */
+static void initErrorLED() {
+    pinMode(LED_ERR_PIN, OUTPUT);
+    digitalWrite(LED_ERR_PIN, HIGH);    // ON at startup (no BLE connection yet)
+}
+
+static void setErrorLED(bool on) {
+    digitalWrite(LED_ERR_PIN, on ? HIGH : LOW);
+}
+
+/* ================================================================
  *  BLE Server  (NimBLE, Coded PHY long-range advertising)
  * ================================================================ */
 static NimBLEServer *pServer = NULL;
 
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *, NimBLEConnInfo &ci) override {
+        setErrorLED(false);             // Clear error — remote connected
         Serial.printf("BLE connected  handle=%d\n", ci.getConnHandle());
     }
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
         motorsStop();
         servo_rate_x = 0;
         servo_rate_y = 0;
+        setErrorLED(true);              // Signal error — connection lost
         Serial.printf("BLE disconnected (reason=%d) — motors stopped\n", reason);
         // Restart advertising
         NimBLEDevice::getAdvertising()->start(0);
@@ -426,6 +445,7 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\n=== RC-CAR ===");
 
+    initErrorLED();
     initMotors();
     motorsStop();
     initServos();

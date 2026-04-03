@@ -15,36 +15,36 @@
  *  Pin Definitions
  * ================================================================ */
 
-// ---- Display (ILI9341, parallel 8-bit) ----
-#define LCD_WR_PIN      47
-#define LCD_RD_PIN      16      // Was 46 (strapping pin)
-#define LCD_RS_PIN      38      // DC/RS
-#define LCD_CS_PIN      41
-#define LCD_RST_PIN     42
-#define LCD_D0_PIN      12
-#define LCD_D1_PIN      11
-#define LCD_D2_PIN      40      // Was 48 (not in safe list)
-#define LCD_D3_PIN      39      // Was 21 (slow LOW transition)
-#define LCD_D4_PIN      18
-#define LCD_D5_PIN      17
-#define LCD_D6_PIN      14
-#define LCD_D7_PIN      13
+// ---- Display (U1 → U16 ILI9341, parallel 8-bit) ----
+#define LCD_WR_PIN      16
+#define LCD_RD_PIN      15
+#define LCD_RS_PIN      39      // DC/RS
+#define LCD_CS_PIN      40
+#define LCD_RST_PIN     41
+#define LCD_D0_PIN      13
+#define LCD_D1_PIN      12
+#define LCD_D2_PIN      42
+#define LCD_D3_PIN      47
+#define LCD_D4_PIN      38
+#define LCD_D5_PIN      18
+#define LCD_D6_PIN      17
+#define LCD_D7_PIN      14
 
-// ---- Joystick 1 (driving) ----
+// ---- Joystick 1 — driving (U1 → U6 HW-504-left) ----
 #define JOY1_VRX_PIN    1       // ADC1_CH0
 #define JOY1_VRY_PIN    2       // ADC1_CH1
-#define JOY1_SW_PIN     15      // Was GPIO 3 (strapping)
+#define JOY1_SW_PIN     4       // ADC1_CH3
 
-// ---- Joystick 2 (camera pan) ----
-#define JOY2_VRX_PIN    4       // ADC1_CH3
-#define JOY2_VRY_PIN    5       // ADC1_CH4
-#define JOY2_SW_PIN     6
+// ---- Joystick 2 — camera pan (U1 → U7 HW-504-right) ----
+#define JOY2_VRX_PIN    5       // ADC1_CH4
+#define JOY2_VRY_PIN    6       // ADC1_CH5
+#define JOY2_SW_PIN     7       // ADC1_CH6
 
-// ---- LEDs ----
-#define LED_CONN_PIN    10      // ON = disconnected
-#define LED_SPD1_PIN    7
-#define LED_SPD2_PIN    8
-#define LED_SPD3_PIN    9
+// ---- LEDs (U1 → U12-U15 resistors → U8-U11 LEDs) ----
+#define LED_SPD1_PIN    8       // SPD01
+#define LED_SPD2_PIN    9       // SPD02
+#define LED_SPD3_PIN    10      // SPD03
+#define LED_CONN_PIN    11      // ERR — ON = disconnected
 
 /* ================================================================
  *  LovyanGFX display (ILI9341, parallel 8-bit)
